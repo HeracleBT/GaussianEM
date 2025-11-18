@@ -47,20 +47,13 @@ class Particles:
         )
         self.particle_num = data.N
         self.images = data
-        # self.images = [torch.from_numpy(particles[i].copy())[None] for i in range(self.particle_num)]
         self.particle_size = data.D
         self.size_scale = self.particle_size / 2  ### scale vol into [-1, 1], stablize training
 
         self.ctf_dir = "%s/%s" % (self.path, ctf_file)
-        # ctf = np.load(self.ctf_dir)
-        # self.ctf = torch.from_numpy(ctf).float().cuda()
         self.ctf_param = np.load(self.ctf_dir)
-        # self.ctf_param = torch.from_numpy(self.ctf_param).float().cuda()
         self.ctf_mask = circular_mask(self.particle_size).cuda()
-
         self.load_poses()
-        
-        # self.point_dir = "%s/init_gaussians.npy" % self.path
         self.point_dir = "%s/%s" % (self.path, point_cloud)
     
     def load_poses(self):
@@ -107,50 +100,31 @@ class Particles:
 
     def init_Gaussians(self, scale_bound=None, max_density=None):
         out = np.load(self.point_dir)
-        # max_val = float(np.max(out[:, 3:4]))
-        # print(max_val)
-        # sys.exit()
-        # self.gaussians = GaussianModel(scale_bound)
         self.gaussians = GaussianModel(scale_bound, max_density=max_density)
-        # print(out[0])
         out[:, :3] /= self.size_scale * self.pixel_size
-        # print(out[0])
         new_points = out.copy()
         new_points[:, 0] = out[:, 2]  ### Note: z y x --> x y z
         new_points[:, 2] = out[:, 0]
 
         # self.gaussians.create_from_pcd(new_points[:, :3], new_points[:, 3:4], 1.0)
 
-        densities = new_points[:, 3:4] * 200
+        densities = new_points[:, 3:4] * 5
         densities = np.clip(densities, None, 15.0)
         self.gaussians.create_from_pcd(new_points[:, :3], densities, 1.0)   ### fit image
-
-        # mean_density = np.mean(new_points[:, 3:4])
-        # # mean_density = 1.0
-        # self.gaussians.create_from_pcd(new_points[:, :3], np.ones_like(new_points[:, 3:4])* mean_density, 1.0)
-
-        # if "1" in self.orientation_dir:
-        #     self.gaussians.create_from_pcd(new_points[:, :3], new_points[:, 3:4] * 1.25, 1.0)
-        # else:
-        #     self.gaussians.create_from_pcd(new_points[:, :3], new_points[:, 3:4] * 0.75, 1.0)
-        
 
 
     def save(self, epoch, queryfunc, output_path=None):
         if output_path is None:
             point_cloud_path = osp.join(
-                self.path, f"point_cloud_{self.half_name}", f"epoch_{epoch}"
+                self.path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
             )
         else:
             point_cloud_path = osp.join(
-                output_path, f"point_cloud_{self.half_name}", f"epoch_{epoch}"
+                output_path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
             )
         self.gaussians.save_ply(osp.join(point_cloud_path, "point_cloud.ply"))
         if queryfunc is not None:
             vol_pred = queryfunc(self.gaussians)["vol"]
-            vol_gt = self.vol_gt
-            np.save(osp.join(point_cloud_path, "vol_gt.npy"), t2a(vol_gt))
-            # np.save(osp.join(point_cloud_path, "vol_pred.npy"), t2a(vol_pred))
             vol_pred_mrc = osp.join(point_cloud_path, "vol_pred.mrc")
             with mrcfile.new(vol_pred_mrc, overwrite=True) as mrc:
                 mrc.set_data(t2a(vol_pred).astype(np.float32))
@@ -159,11 +133,11 @@ class Particles:
     def save_prune(self, epoch, queryfunc, output_path=None):
         if output_path is None:
             point_cloud_path = osp.join(
-                self.path, f"point_cloud_{self.half_name}", f"epoch_{epoch}"
+                self.path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
             )
         else:
             point_cloud_path = osp.join(
-                output_path, f"point_cloud_{self.half_name}", f"epoch_{epoch}"
+                output_path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
             )
         self.gaussians.save_ply(osp.join(point_cloud_path, "point_cloud_after_prune.ply"))
         if queryfunc is not None:
@@ -266,7 +240,7 @@ def training_EM_homo(
     # Train
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
-    ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.half_name}")
+    ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.particle_name}")
     os.makedirs(ckpt_save_path, exist_ok=True)
     total_iterations = opt.epoch * dataset.particle_num
     progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)

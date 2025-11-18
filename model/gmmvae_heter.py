@@ -63,7 +63,6 @@ class HetGMMVAESimpleIndependent(nn.Module):
         qdim,
         in_dim,
         zdim,
-        n_clusters,
         gaussian_embedding_dim=128,
         gaussian_kdim=256,
         gaussian_klayers=3,
@@ -76,7 +75,6 @@ class HetGMMVAESimpleIndependent(nn.Module):
         super(HetGMMVAESimpleIndependent, self).__init__()
         self.zdim = zdim
         self.in_dim = in_dim
-        self.n_clusters = n_clusters
         if archi_type == 'MLP':
             self.encoder = MLP(
                 in_dim,
@@ -128,22 +126,19 @@ class HetGMMVAESimpleIndependent(nn.Module):
         self.d_density = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim, bias=True),
             activation(inplace=True),
-            nn.Linear(self.feature_dim, 1, bias=False),
+            nn.Linear(self.feature_dim, 1, bias=True),
         )
         self.d_scaling = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim, bias=True),
             activation(inplace=True),
-            nn.Linear(self.feature_dim, 1, bias=False),
+            nn.Linear(self.feature_dim, 1, bias=True),
         )
         self.d_xyz = nn.Sequential(
             nn.Linear(self.feature_dim, self.feature_dim, bias=True),
             activation(inplace=True),
-            nn.Linear(self.feature_dim, 3, bias=False),
+            nn.Linear(self.feature_dim, 3, bias=True),
         )
 
-        self.pi_=nn.Parameter(torch.FloatTensor(n_clusters,).fill_(1)/n_clusters,requires_grad=True)
-        self.mu_c=nn.Parameter(torch.FloatTensor(n_clusters, zdim).fill_(0),requires_grad=True)
-        self.log_sigma2_c=nn.Parameter(torch.FloatTensor(n_clusters, zdim).fill_(0),requires_grad=True)
 
     def make_decoder(self, in_dim, hidden_dim, nlayers, out_dim, archi_type, activation=nn.ReLU, bias=True, norm=None):
         layers = [
@@ -156,15 +151,11 @@ class HetGMMVAESimpleIndependent(nn.Module):
             else:
                 layers.append(ResidLinear(hidden_dim, hidden_dim, bias=bias))
             layers.append(activation(inplace=True))
-        # if norm is not None:
-        #     if norm == "instance":
-        #         layers.append(nn.InstanceNorm1d(hidden_dim))
-        #     elif norm == "layer":
-        #         layers.append(nn.LayerNorm(hidden_dim))
+
         layers.append(nn.Linear(hidden_dim, out_dim, bias=bias))
         # layers.append(activation(inplace=True))
         if norm is not None:
-            layers.append(activation(inplace=True))
+            # layers.append(activation(inplace=True))
             if norm == "instance":
                 layers.append(nn.InstanceNorm1d(out_dim))
             elif norm == "layer":
@@ -203,15 +194,4 @@ class HetGMMVAESimpleIndependent(nn.Module):
         else:
             gaussian_info = torch.cat([gaussian_density, gaussian_scaling, gaussian_pos], dim=-1)
             return self.decode(z, gaussian_info), z_mu, z_logvar
-
-
-    def gaussian_pdfs_log(self,x,mus,log_sigma2s):
-        G=[]
-        for c in range(self.n_clusters):
-            G.append(self.gaussian_pdf_log(x,mus[c:c+1,:],log_sigma2s[c:c+1,:]).view(-1,1))
-        return torch.cat(G,1)
-
-    @staticmethod
-    def gaussian_pdf_log(x,mu,log_sigma2):
-        return -0.5*(torch.sum(np.log(np.pi*2)+log_sigma2+(x-mu).pow(2)/torch.exp(log_sigma2),1))
 

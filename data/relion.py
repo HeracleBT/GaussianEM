@@ -4,7 +4,7 @@ from datetime import datetime as dt
 from typing import Tuple, Union, Optional, TextIO, Iterable, List, Callable
 from typing_extensions import Self
 import os
-from mrcfile_em import MRCHeader, write_mrc, fix_mrc_header
+from data.mrcfile_em import MRCHeader, write_mrc, fix_mrc_header
 from concurrent import futures
 import torch
 

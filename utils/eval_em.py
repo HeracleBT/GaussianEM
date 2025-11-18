@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 from scipy.ndimage import distance_transform_edt, binary_dilation
-from utils_em import fftn_center, ifftn_center
+from utils.utils_em import fftn_center, ifftn_center
 from scipy.spatial.distance import cdist
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA

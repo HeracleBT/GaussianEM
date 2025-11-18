@@ -11,7 +11,7 @@ import open3d as o3d
 import sys
 
 sys.path.append("./")
-from general_utils import t2a
+from utils.general_utils import t2a
 
 
 def show_gaussians(

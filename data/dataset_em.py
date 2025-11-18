@@ -1,10 +1,10 @@
 import numpy as np
 import torch
 from typing import Optional, Tuple, Union
-from relion import ImageSource
+from data.relion import ImageSource
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import BatchSampler, RandomSampler, SequentialSampler
-from eval_em import spherical_window_mask
+from utils.eval_em import spherical_window_mask
 
 
 class ImageDataset(torch.utils.data.Dataset):

@@ -8,8 +8,8 @@ from plyfile import PlyData, PlyElement
 sys.path.append("./")
 
 from simple_knn._C import distCUDA2
-from r2_gaussian.utils.system_utils import mkdir_p
-from r2_gaussian.utils.gaussian_utils import (
+from utils.general_utils import mkdir_p
+from utils.gaussian_utils import (
     inverse_sigmoid,
     get_expon_lr_func,
     build_rotation,
@@ -18,7 +18,7 @@ from r2_gaussian.utils.gaussian_utils import (
     strip_symmetric,
     build_scaling_rotation,
 )
-from scipy.spatial import cKDTree
+
 
 class GaussianModel:
     def setup_functions(self, scale_bound=None, max_density=None):
@@ -29,14 +29,6 @@ class GaussianModel:
             return symm
 
         if scale_bound is not None:
-            # self.size_scale = 64 * 3.0
-            # self.scaling_activation = (
-            #     lambda x: (torch.tanh(x) * 0.5 + 1.0)
-            # )
-            # self.scaling_inverse_activation = lambda x: inverse_tanh(
-            #     (x - 1.0) * 2
-            # )
-            # self.scale_bound = np.array([0.5, 1.5]) / self.size_scale
             scale_min_bound, scale_max_bound = scale_bound
             self.scaling_activation = (
                 lambda x: torch.sigmoid(x) * (scale_max_bound - scale_min_bound) + scale_min_bound
@@ -51,15 +43,6 @@ class GaussianModel:
             self.scale_bound = None
         self.covariance_activation = build_covariance_from_scaling_rotation
 
-        # if max_density is not None:
-        #     self.density_activation = lambda x: torch.tanh(x) + 1.0
-        #     self.density_inverse_activation = lambda x: inverse_tanh(x - 1.0)
-        #     self.max_density = max_density
-        # else:
-        #     self.density_activation = torch.nn.Softplus()  # use softplus for [0, +inf]
-        #     self.density_inverse_activation = inverse_softplus
-        #     self.max_density = None
-
         if max_density is not None:
             self.density_activation = (
                 lambda x: torch.clamp_max(torch.nn.functional.softplus(x), max_density)
@@ -72,9 +55,6 @@ class GaussianModel:
             self.density_activation = torch.nn.Softplus()  # use softplus for [0, +inf]
             self.density_inverse_activation = inverse_softplus
             self.max_density = None
-
-        # self.xyz_activation = torch.nn.Tanh()
-        # self.xyz_inverse_activation = inverse_tanh
 
         self.rotation_activation = torch.nn.functional.normalize
 
@@ -122,7 +102,6 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        # return self.scaling_activation(self._scaling.repeat(1, 3)) / self.size_scale
         return self.scaling_activation(self._scaling.repeat(1, 3))
 
     @property
@@ -155,7 +134,6 @@ class GaussianModel:
         filter_indices = dist2 < torch.mean(dist2) * 3
         dist2 = dist2[filter_indices]
         fused_point_cloud = fused_point_cloud[filter_indices]
-        # fused_point_cloud = self.xyz_inverse_activation(fused_point_cloud)
         density = torch.tensor(density)
         if self.max_density is not None:
             density = torch.clamp_max(density, self.max_density * 0.9)
@@ -164,10 +142,6 @@ class GaussianModel:
         )
         fused_density = fused_density[filter_indices]
 
-        # print(torch.sqrt(dist2))
-        
-        # print(self.scale_bound)
-        # sys.exit()
         if self.scale_bound is not None:
             min_val = self.scale_bound[0] ** 2
             max_val = (self.scale_bound[0] + self.scale_bound[1]) ** 2 / 4
@@ -176,22 +150,8 @@ class GaussianModel:
                 min = min_val,
                 max = max_val
             )
-        # print(torch.max(torch.sqrt(dist2)), torch.min(torch.sqrt(dist2)))
-        # print(torch.mean(torch.sqrt(dist2)))
-        # print(torch.quantile(torch.sqrt(dist2), 0.9))
-        # print(self.scale_bound)
-        # print(torch.sqrt(dist2))
-        # print(self.scaling_inverse_activation(torch.sqrt(dist2) * self.size_scale)[..., None])
-        # sys.exit()
-        # print(torch.where(torch.isnan(dist2)))
-        # print(dist2[torch.where(torch.isnan(dist2))])
-        scales = self.scaling_inverse_activation(torch.sqrt(dist2))[..., None]
-        # scales = self.scaling_inverse_activation(torch.sqrt(dist2) * self.size_scale)[..., None]
 
-        # print(dist2[torch.where(torch.isnan(self.scaling_inverse_activation(torch.sqrt(dist2))))])
-        # scales = self.scaling_inverse_activation(torch.sqrt(dist2))[..., None].repeat(
-        #     1, 3
-        # )
+        scales = self.scaling_inverse_activation(torch.sqrt(dist2))[..., None]
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
@@ -230,7 +190,6 @@ class GaussianModel:
             },
         ]
 
-        # self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.optimizer = torch.optim.Adam(l)
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init * self.spatial_lr_scale,
@@ -265,7 +224,6 @@ class GaussianModel:
 
     def construct_list_of_attributes(self):
         l = ["x", "y", "z", "nx", "ny", "nz"]
-        # All channels except the 3 DC
         l.append("density")
         for i in range(self._scaling.shape[1]):
             l.append("scale_{}".format(i))
@@ -505,18 +463,10 @@ class GaussianModel:
             selected_pts_mask,
             torch.max(self.get_scaling, dim=1).values > densify_scale_threshold,
         )
-        # selected_pts_mask = torch.logical_and(
-        #     selected_pts_mask,
-        #     torch.min(self.get_scaling, dim=1).values > 0.005,
-        # )
-
-        # print(padded_grad[selected_pts_mask])
-        # print(torch.sum(selected_pts_mask), " points split")
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
         samples = torch.normal(mean=means, std=stds)
-        # samples = (torch.rand((stds.size(0), 3), device="cuda") * 2 - 1) * stds
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
             selected_pts_mask
@@ -524,17 +474,10 @@ class GaussianModel:
         new_scaling = self.scaling_inverse_activation(
             self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
         )[..., :1]
-        # new_scaling = self.scaling_inverse_activation(
-        #     self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.6 * N)
-        # )
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
-        # new_density = self._density[selected_pts_mask].repeat(N, 1)
         new_density = self.density_inverse_activation(
             self.get_density[selected_pts_mask].repeat(N, 1) * (1 / N)
         )
-        # new_density = self.density_inverse_activation(
-        #     self.get_density[selected_pts_mask].repeat(N, 1) / (N / np.sqrt(2))
-        # )
         new_max_radii2D = self.max_radii2D[selected_pts_mask].repeat(N)
 
         self.densification_postfix(
@@ -559,34 +502,13 @@ class GaussianModel:
             torch.norm(grads, dim=-1) >= grad_threshold, True, False
         )
 
-        # print(torch.sum(selected_pts_mask), " points clone111")
-        # temp_norm = torch.norm(grads, dim=-1)
-        # print(temp_norm[selected_pts_mask])
-        # print(grad_threshold)
-
-        # selected_pts_mask_abs = torch.where(torch.norm(grads_abs, dim=-1) >= grad_abs_threshold, True, False)
-        # selected_pts_mask = torch.logical_or(selected_pts_mask, selected_pts_mask_abs)
-
-        # print(torch.sum(selected_pts_mask), " points clone222")
-
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
             torch.max(self.get_scaling, dim=1).values <= densify_scale_threshold,
         )
 
-        # print(torch.sum(selected_pts_mask), " points clone")
-        # print(grads[selected_pts_mask])
-        # print(grads_abs[selected_pts_mask])
-        # if torch.sum(selected_pts_mask) > 0:
-        #     temp_norm = torch.norm(grads, dim=-1)
-        #     # temp_abs_norm = torch.norm(grads_abs, dim=-1)
-        #     print(temp_norm[selected_pts_mask])
-
         new_xyz = self._xyz[selected_pts_mask]
         new_densities = self._density[selected_pts_mask]
-        # new_densities = self.density_inverse_activation(
-        #     self.get_density[selected_pts_mask] * 0.5
-        # )
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_max_radii2D = self.max_radii2D[selected_pts_mask]
@@ -614,8 +536,6 @@ class GaussianModel:
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        # print(torch.mean(grads), torch.std(grads))
-
         grads_abs = self.xyz_gradient_accum_abs / self.denom
         grads_abs[grads_abs.isnan()] = 0.0
 
@@ -632,8 +552,6 @@ class GaussianModel:
         # Prune gaussians with too small density
         prune_mask = (self.get_density < min_density).squeeze()
 
-        # print(torch.sum(prune_mask), "prune poinst")
-        # Prune gaussians outside the bbox
         if bbox is not None:
             xyz = self.get_xyz
             prune_mask_xyz = (
@@ -653,9 +571,6 @@ class GaussianModel:
         if max_scale:
             big_points_ws = self.get_scaling.max(dim=1).values > max_scale
             prune_mask = torch.logical_or(prune_mask, big_points_ws)
-
-            # print(torch.mean(self.get_scaling, dim=1), max_scale)
-            # print(torch.sum(big_points_ws))
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
@@ -682,14 +597,6 @@ class SimpleGaussian:
         self.max_radii2D = torch.empty(0)
 
         if 'density' in activate:
-            # if max_density is not None:
-            #     self.density_activation = lambda x: torch.tanh(x) + 1.0
-            #     self.density_inverse_activation = lambda x: inverse_tanh(x - 1.0)
-            #     self.max_density = max_density
-            # else:
-            #     self.density_activation = torch.nn.Softplus()  # use softplus for [0, +inf]
-            #     self.density_inverse_activation = inverse_softplus
-            #     self.max_density = None
             if max_density is not None:
                 self.density_activation = (
                     lambda x: torch.clamp_max(torch.nn.functional.softplus(x), max_density)
@@ -707,14 +614,6 @@ class SimpleGaussian:
 
         if 'scaling' in activate:
             if scale_bound is not None:
-                # self.size_scale = 64 * 3.0
-                # self.scaling_activation = (
-                #     lambda x: (torch.tanh(x) * 0.5 + 1.0)
-                # )
-                # self.scaling_inverse_activation = lambda x: inverse_tanh(
-                #     (x - 1.0) * 2
-                # )
-                # self.scale_bound = np.array([0.5, 1.5]) / self.size_scale
                 scale_min_bound, scale_max_bound = scale_bound
                 self.scaling_activation = (
                     lambda x: torch.sigmoid(x) * (scale_max_bound - scale_min_bound) + scale_min_bound
@@ -732,8 +631,6 @@ class SimpleGaussian:
             self.scale_bound = None
 
         if 'position' in activate:
-            # self.xyz_activation = torch.nn.Tanh()
-            # self.xyz_inverse_activation = inverse_tanh
             self.xyz_activation = True
         else:
             self.xyz_activation = None
@@ -751,10 +648,6 @@ class SimpleGaussian:
 
     @property
     def get_xyz(self):
-        # if self.xyz_activation is None:
-        #     return self._xyz
-        # else:
-        #     return self.xyz_activation(self._xyz)
         return self._xyz
 
     @property

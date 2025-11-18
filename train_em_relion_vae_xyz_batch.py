@@ -6,8 +6,6 @@ from tqdm import tqdm
 from argparse import ArgumentParser
 import numpy as np
 import mrcfile
-import starfile
-import json
 from collections import defaultdict
 import torch.nn.functional as F
 import pickle
@@ -19,137 +17,16 @@ from model.render_query_EM import query, render
 from utils.general_utils import safe_state
 from utils.general_utils import load_config
 from utils.general_utils import t2a
-from utils.utils_em import circular_mask, R_from_relion, relion_angle_to_matrix
-from data.dataset_em import ImageDataset, make_dataloader
+from data.dataset_em import make_dataloader
 from particle_preprocess import compute_single_ctf, ctf_params
 from model.gmmvae_heter import HetGMMVAESimpleIndependent
 from torch import nn
 from utils.general_utils import mkdir_p
 from scipy.spatial import cKDTree
 from sklearn.neighbors import radius_neighbors_graph
-from utils.eval_em import cluster_kmeans, get_nearest_point
+from data.training_particles import Particles
 
 epsilon = 0.0000005
-
-class Particles:
-    gaussians: GaussianModel
-
-    def __init__(self, dataset_dir, particle_name, half_name, pose_file, ctf_file, point_cloud, cfg, window=True):
-        self.path = dataset_dir
-        self.particle_name = particle_name
-        self.half_name = half_name
-        self.images_dir = "%s/%s.mrcs" % (self.path, half_name)
-        self.orientation_dir = "%s/%s" % (self.path, pose_file)
-        self.vol_dir = "%s/%s.mrc" % (self.path, particle_name)
-        self.cfg_file = "%s/%s" % (self.path, cfg)
-        
-        self.init_cfg()
-        invert_data = True if self.scanner_cfg['invert_contrast'] else False
-        data = ImageDataset(
-            mrcfile=self.images_dir,
-            lazy=True,
-            invert_data=invert_data,
-            ind=None,
-            window=window,
-            datadir=None,
-        )
-        self.particle_num = data.N
-        self.images = data
-        self.particle_size = data.D
-        self.size_scale = self.particle_size / 2  ### scale vol into [-1, 1], stablize training
-
-        self.ctf_dir = "%s/%s" % (self.path, ctf_file)
-        self.ctf_param = np.load(self.ctf_dir)
-        self.ctf_mask = circular_mask(self.particle_size).cuda()
-
-        self.load_poses()        
-        self.point_dir = "%s/%s" % (self.path, point_cloud)
-
-        self.mask_dir = "%s/%s" % (self.path, "mask_indices.npy")
-        # if os.path.exists(self.mask_dir):
-        #     print("mask operation")
-        #     self.mask_indices = np.load(self.mask_dir)[:, None].astype(np.float32)
-        #     self.mask_indices = torch.tensor(self.mask_indices).cuda()
-        # else:
-        #     self.mask_indices = None
-        self.mask_indices = None
-    
-    def load_poses(self):
-        poses = []
-        if "star" in self.orientation_dir:
-            df = starfile.read(self.orientation_dir)
-            particle_df = df['particles']
-            for i in range(self.particle_num):
-                iparticle = particle_df.iloc[i]
-                ipose_rot = relion_angle_to_matrix([iparticle.rlnAngleRot, iparticle.rlnAngleTilt, iparticle.rlnAnglePsi])
-                if "rlnOriginX" in particle_df.columns and "rlnOriginY" in particle_df.columns:
-                    ipose_tran = np.array([iparticle.rlnOriginX, iparticle.rlnOriginY]) / self.size_scale
-                elif "rlnOriginXAngst" in particle_df.columns and "rlnOriginYAngst" in particle_df.columns:
-                    ipose_tran = np.array([iparticle.rlnOriginXAngst, iparticle.rlnOriginYAngst]) / self.pixel_size / self.size_scale
-                poses.append([ipose_rot, ipose_tran])
-        elif "npy" in self.orientation_dir:
-            df = np.load(self.orientation_dir).astype(np.float64)
-            if df.shape[1] == 5:
-                angles = df[:, :3]
-                trans = df[:, 3:] / self.size_scale
-                rots = R_from_relion(angles)
-            elif df.shape[1] == 11:
-                rots = df[:, :9].reshape(-1, 3, 3)
-                trans = df[:, 9:] / self.size_scale
-            else:
-                print("Error: the dimension of pose")
-            for i in range(self.particle_num):
-                    poses.append([rots[i], trans[i]])
-        self.orientations = poses
-
-    def init_cfg(self):
-        with open(self.cfg_file, "r") as f:
-            meta_data = json.load(f)
-
-        self.scanner_cfg = meta_data['cfg']
-        if not "dVoxel" in self.scanner_cfg:
-            self.scanner_cfg["dVoxel"] = list(
-                np.array(self.scanner_cfg["sVoxel"])
-                / np.array(self.scanner_cfg["nVoxel"])
-            )
-        self.bbox = torch.tensor(meta_data['bbox'])
-        self.pixel_size = self.scanner_cfg['pixelSize']
-
-
-    def init_Gaussians(self, scale_bound=None, max_density=None):
-        out = np.load(self.point_dir)
-        self.gaussians = GaussianModel(scale_bound=scale_bound, max_density=max_density)
-        out[:, :3] /= self.size_scale * self.pixel_size
-        new_points = out.copy()
-        new_points[:, 0] = out[:, 2]  ### Note: z y x --> x y z
-        new_points[:, 2] = out[:, 0]
-
-        self.gaussians.create_from_pcd(new_points[:, :3], new_points[:, 3:4], 1.0)
-
-    def load_Gaussians(self, scale_bound=None, max_density=None):
-        self.gaussians = GaussianModel(scale_bound=scale_bound, max_density=max_density)
-        self.gaussians.load_ply(self.point_dir)
-
-    def save(self, epoch, queryfunc, output_path=None):
-        if output_path is None:
-            point_cloud_path = osp.join(
-                self.path, f"point_cloud_{self.half_name}", f"epoch_{epoch}"
-            )
-        else:
-            point_cloud_path = osp.join(
-                output_path, f"point_cloud_{self.half_name}", f"epoch_{epoch}"
-            )
-        self.gaussians.save_ply(osp.join(point_cloud_path, "point_cloud.ply"))
-        if queryfunc is not None:
-            vol_pred = queryfunc(self.gaussians)["vol"]
-            vol_gt = self.vol_gt
-            np.save(osp.join(point_cloud_path, "vol_gt.npy"), t2a(vol_gt))
-            # np.save(osp.join(point_cloud_path, "vol_pred.npy"), t2a(vol_pred))
-            vol_pred_mrc = osp.join(point_cloud_path, "vol_pred.mrc")
-            with mrcfile.new(vol_pred_mrc, overwrite=True) as mrc:
-                mrc.set_data(t2a(vol_pred).astype(np.float32))
-                mrc.voxel_size = self.pixel_size
-
 
 def real_space_cryonerf(output, gt, ctf, mask=None, ctf_sign=False):
     D = output.shape[-1]
@@ -214,11 +91,9 @@ def weight_assignment(dist_ratio):
 def training_EM_heter(
     dataset: Particles,
     opt: OptimizationParams_EM,
-    model,
     checkpoint,
     output_dir,
-    batch_size,
-    zdim
+    batch_size
 ):
     first_iter = 0
     # seed_torch()
@@ -238,6 +113,24 @@ def training_EM_heter(
     D = dataset.particle_size
     std = scanner_cfg['std']
     mask_indices = dataset.mask_indices[None, :] if dataset.mask_indices is not None else None
+    zdim = scanner_cfg['zdim']
+
+    gaussian_embedding_dim = scanner_cfg['gaussian_embedding_dim']
+    model = HetGMMVAESimpleIndependent(
+        qlayers=scanner_cfg['qlayers'],
+        qdim=scanner_cfg['qdim'],
+        in_dim=D * D,
+        zdim=zdim,
+        gaussian_embedding_dim=gaussian_embedding_dim,
+        gaussian_kdim=scanner_cfg['gaussian_kdim'],
+        gaussian_klayers=scanner_cfg['gaussian_klayers'],
+        feature_dim=scanner_cfg['feature_dim'],
+        feature_kdim=scanner_cfg['feature_kdim'],
+        feature_klayers=scanner_cfg['feature_klayers'],
+        activation=nn.ReLU,
+        archi_type='MLP'
+    )
+    model.to(device="cuda")
 
     if checkpoint is not None:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -245,12 +138,12 @@ def training_EM_heter(
 
     if output_dir is not None:
         save_path = osp.join(dataset.path, output_dir)
+        if not os.path.exists(save_path):
+            os.mkdir(save_path)
 
     # Train
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
-    ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.half_name}")
-    os.makedirs(ckpt_save_path, exist_ok=True)
     total_iterations = opt.epoch * dataset.particle_num
     progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)
     progress_bar.update(first_iter)
@@ -431,6 +324,18 @@ def training_EM_heter(
 
             optim.step()
 
+            progress_bar.set_postfix(
+                {
+                    # "render": f"{loss['render'].item():.1e}",
+                    "kld": f"{loss['kld'].item():.1e}",
+                    "nbr_nm": f"{loss['neighbor_norm'].item():.1e}",
+                    "nbr_co": f"{loss['neighbor_coherence_loss'].item():.1e}",
+                    "dplace": f"{loss['displacement_orient_loss'].item():.1e}",
+                    "repul": f"{loss['repulsion_loss'].item():.1e}",
+                }
+            )
+            progress_bar.update(B)
+
             for k in loss.keys():
                 record_loss[k] = loss[k].item()
                 loss[k] = 0.0
@@ -445,6 +350,8 @@ def training_EM_heter(
             z = None
             outdir = osp.join(dataset.path, output_dir)
             save_checkpoint(model, epoch, outdir, z)
+
+    return model
 
 
 def eval_model_output(
@@ -516,7 +423,6 @@ def eval_model_output(
             ctf = compute_single_ctf(dataset.particle_size, ctf_setting).float()
             ctf *= fourier_mask
             gt_image = original_image.cuda()
-            # gt_image = gt_image / 8.7975
             gt_image = gt_image / std
             inputted_img = gt_image
 
@@ -557,9 +463,7 @@ def eval_model_output(
     else:
 
         base_density = gaussians1._density.clone().detach()
-        activate_density = gaussians1.get_density.clone().detach()
         base_scaling = gaussians1._scaling.clone().detach()
-        activate_scaling = gaussians1.get_scaling.clone().detach()
         base_xyz = gaussians1._xyz.clone().detach()
         base_pos = gaussians1.get_xyz.clone().detach()
         eval_z = torch.tensor(eval_z, device="cuda").view(1, -1)
@@ -612,22 +516,18 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_epochs", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default=None)
-    parser.add_argument("--half_name1", type=str, default=None)
-    parser.add_argument("--half_name2", type=str, default=None)
+    parser.add_argument("--particle_name", type=str, default=None)
     parser.add_argument("--pose", type=str, default=None)
     parser.add_argument("--ctf", type=str, default=None)
     parser.add_argument("--point", type=str, default=None)
     parser.add_argument("--cfg", type=str, default=None)
     parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--check", action="store_true")
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--zdim", type=int, default=8)
     parser.add_argument("--no_window", action="store_true")
     args = parser.parse_args(sys.argv[1:])
 
     args.save_epochs.append(args.epoch)
     safe_state(args.quiet)
-    # print(args)
 
     args.lr = 1e-4
     args.wd = 0
@@ -646,91 +546,21 @@ if __name__ == "__main__":
 
     print("Use total data")
     window_flag = not args.no_window
-    dataset = Particles(args.source_path, args.particle_name, args.half_name1, args.pose, args.ctf, args.point, args.cfg, window=window_flag)
+    dataset = Particles(args.source_path, args.particle_name, args.pose, args.ctf, args.point, args.cfg, window=window_flag)
 
-    pos_enc_dim = 0
-    D = dataset.particle_size
-    gaussian_embedding_dim = 32
-    model = HetGMMVAESimpleIndependent(
-        qlayers=3,
-        qdim=1024,
-        in_dim=D * D,
-        zdim=args.zdim,
-        n_clusters=args.nclass,
-        gaussian_embedding_dim=gaussian_embedding_dim,
-        gaussian_kdim=64,
-        gaussian_klayers=3,
-        feature_dim=256,
-        feature_kdim=64,
-        feature_klayers=2,
-        activation=nn.ReLU,
-        archi_type='MLP'
+    model = training_EM_heter(
+        dataset,
+        op.extract(args),
+        args.start_checkpoint,
+        args.output,
+        args.batch_size
     )
-    model.to(device="cuda")
 
-    if not args.check:
+    print("Gaussians trained complete.")
 
-        training_EM_heter(
-            dataset,
-            op.extract(args),
-            model,
-            args.start_checkpoint,
-            args.output,
-            args.batch_size,
-            args.zdim,
-        )
-        print("Gaussians trained complete.")
+    output_dir = osp.join(args.source_path, args.output)
+    model_epoch = args.epoch - 1
+    model_weight = "weights.%d.pkl" % model_epoch
+    eval_model_output(dataset, model, output_dir, model_weight)
 
-
-    #### test 3DGS
-
-    else:
-
-        output_dir = osp.join(args.source_path, args.output)
-        model_epoch = args.epoch - 1
-        model_weight = "weights.%d.pkl" % model_epoch
-        eval_model_output(dataset, model, output_dir, model_weight)
-
-        output_file = osp.join(output_dir, "weights.%d.output.pkl" % model_epoch)
-        with open(output_file, 'rb') as f:
-            model_output = pickle.load(f)
-        # print(model_output)
-        z_mu = model_output["z_mu"]
-
-        K = 10
-        kmeans_labels, centers = cluster_kmeans(z_mu, K)
-        centers, centers_ind = get_nearest_point(z_mu, centers)
-
-        print(centers)
-        print(centers_ind)
-        center_dir = "%s/output_z_%d" % (output_dir, model_epoch)
-        print(centers.shape)
-        np.save(center_dir, centers)
-
-        for z_value in centers:
-            # print(z_value.dtype)
-            eval_model_output(dataset, model, output_dir, model_weight, eval_z=z_value)
-
-
-
-        # output_dir = osp.join(args.source_path, args.output)
-        # model_epoch = args.epoch - 1
-        # model_weight = "weights.%d.pkl" % model_epoch
-
-        # output_file = osp.join(output_dir, "weights.%d.output.pkl" % model_epoch)
-        # with open(output_file, 'rb') as f:
-        #     model_output = pickle.load(f)
-        # # print(model_output)
-        # z_mu = model_output["z_mu"]
-
-        # from eval_heter import run_pca, get_pc_traj
-        # pc, pca = run_pca(z_mu)
-        # dim = 1
-        # lim = [10, 90]
-        # pc_values = np.percentile(pc[:, dim - 1], np.linspace(lim[0], lim[1], 10, endpoint=True))
-        # traj = get_pc_traj(pca, args.zdim, 10, dim, None, None, pc_values)
-
-        # for z_value in traj:
-        #     # print(z_value.dtype)
-        #     z_value = z_value.astype(np.float32)
-        #     eval_model_output(dataset, model, output_dir, model_weight, eval_z=z_value)
+    print("Save latent variable.")
