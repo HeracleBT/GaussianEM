@@ -18,9 +18,9 @@
 #     --batch 32
 
 
-python analyze_heter.py --source_dir /home/data/Single-Particle/4DGS/GaussianEM/dataset/IgG-1D/gaussian_preprocess \
-    --gaussians point_cloud.ply \
-    --cfg cfg_scale_0.5_1.0.json \
-    --model_weight weights.19.pkl \
-    --latent weights.19.output.pkl \
-    --nclass 20
+# python analyze_heter.py --source_dir /home/data/Single-Particle/4DGS/GaussianEM/dataset/10180 \
+#     --gaussians point_cloud.ply \
+#     --cfg cfg.json \
+#     --model_weight weights.19.pkl \
+#     --latent weights.19.output.pkl \
+#     --nclass 10
