@@ -18,7 +18,7 @@
 #     --batch 32
 
 
-# python analyze_heter.py --source_dir /home/data/Single-Particle/4DGS/GaussianEM/dataset/10180 \
+# python analyze_heter.py --source_dir /home/data/Single-Particle/4DGS/GaussianEM/dataset/10841 \
 #     --gaussians point_cloud.ply \
 #     --cfg cfg.json \
 #     --model_weight weights.19.pkl \
