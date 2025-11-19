@@ -60,11 +60,11 @@ Example: python train_em_relion_vae_xyz_batch.py -s dataset/IgG-1D \
     --ctf ctf.npy \
     --point point_cloud.ply \
     --cfg cfg_scale_0.5_1.0.json \
-    --output heter_density_scaling_pos_zdim10_dp \
+    --output heter_zdim10 \
     --batch 32
 ```
 
-The datasets EMPAIR-(10059, 10180, 10343, 10345, 10841, T6SS_effectors) are available via https://drive.google.com/drive/folders/1185kjegtrHnsF0R1N7DUXD04UjcqxFxw?usp=sharing
+The training configure files and trained models for datasets EMPIAR-(10059, 10180, 10343, 10345, 10841, T6SS_effectors) are available via https://drive.google.com/drive/folders/1185kjegtrHnsF0R1N7DUXD04UjcqxFxw?usp=sharing
 
 ### Analyze the results
 
