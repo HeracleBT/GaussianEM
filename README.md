@@ -31,7 +31,24 @@ pip install -e submodules/xray-gaussian-rasterization-voxelization
 
 ### Preprocess particle stack, poses, ctf information
 
-Extract 2D particles images, orientations and contrast transfer function (ctf) parameters of particles from .star file (RELION format)
+Extract 2D particles images, orientations and contrast transfer function (ctf) parameters of particles from .star file (RELION format). (To be continued)
+
+```
+Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PARTICLE IMAGE STACK] --star_file [RELION FILE] --size [IMAGE SIZE] --downsample_size [DOWNSAMPLE IMAGE SIZE] --apix [PIXEL SIZE] --consensus_map [DENSITY MAP] --map_thres [CONTOUR LEVEL] --output_dir [OUTPUT DIR]
+
+---options---
+--source_dir [str] : directory of project
+--data_dir [str] : directory of particles
+--star_file [str] : .star file 
+--size [int] : raw image size
+--downsample_size [int] : expected size after downsampling
+--apix" [float] : raw pixel size
+--consensus_map [str] : consensus density map as the initial model
+--map_thres [float] : contour level of the consensus density map
+--output_dir" [str] : directory of output files
+```
+
+This script outputs the (downsampled) particle stack (.mrcs), image poses (.npy), image ctf parameters (.npy), initial Gaussians (.ply) and configure file (.json).
 
 ### Train a heterogeneity network
 
@@ -97,3 +114,5 @@ Example: python analyze_heter.py --source_dir dataset/IgG-1D \
     --latent weights.19.output.pkl \
     --nclass 10
 ```
+
+Relevant files for analyzing trained models of datasets EMPIAR-(10059, 10180, 10343, 10345, 10841, T6SS_effectors) are also available via https://drive.google.com/drive/folders/1185kjegtrHnsF0R1N7DUXD04UjcqxFxw?usp=sharing

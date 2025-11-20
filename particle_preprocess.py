@@ -1,12 +1,13 @@
 import numpy as np
 import torch
 from typing import Optional
-import mrcfile
 from scipy.interpolate import RegularGridInterpolator
-import pickle
 from data.mrcfile_em import MRCHeader
-from data.relion import ImageSource
+from data.relion import Relionfile, ImageSource
 import json
+from utils.utils_em import R_from_relion
+from argparse import ArgumentParser
+import sys
 
 class ctf_params:
 
@@ -194,6 +195,69 @@ def sign_flip(chunk: torch.Tensor, indices: np.ndarray) -> torch.Tensor:
     return chunk * -1
 
 
+def parse_pose_star(input, img_d, img_apix):
+    relionfile = Relionfile(input)
+    apix, resolution = relionfile.apix, relionfile.resolution
+    if img_d is not None:
+        resolution = np.array([img_d for _ in range(len(relionfile))])
+    if img_apix is not None:
+        apix = np.array([img_apix for _ in range(len(relionfile))])
+    euler = np.zeros((len(relionfile), 3))
+    euler[:, 0] = relionfile.df["_rlnAngleRot"]
+    euler[:, 1] = relionfile.df["_rlnAngleTilt"]
+    euler[:, 2] = relionfile.df["_rlnAnglePsi"]
+    # print("Euler angles (Rot, Tilt, Psi)")
+    rot = R_from_relion(euler)
+
+    trans = np.zeros((len(relionfile), 2))
+    if "_rlnOriginX" in relionfile.df.columns and "_rlnOriginY" in relionfile.df.columns:
+        # translations in pixels
+        trans[:, 0] = relionfile.df["_rlnOriginX"]
+        trans[:, 1] = relionfile.df["_rlnOriginY"]
+    elif (
+        "_rlnOriginXAngst" in relionfile.df.columns
+        and "_rlnOriginYAngst" in relionfile.df.columns
+    ):
+        # translation in Angstroms (Relion 3.1)
+        if apix is None:
+            raise ValueError(
+                f"Must provide --Apix argument to convert _rlnOriginXAngst and "
+                f"_rlnOriginYAngst translation units as A/px not "
+                f"found in `{input}`!"
+            )
+        trans[:, 0] = relionfile.df["_rlnOriginXAngst"]
+        trans[:, 1] = relionfile.df["_rlnOriginYAngst"]
+        trans /= apix.reshape(-1, 1)
+    else:
+        print(
+            "Warning: Neither _rlnOriginX/Y nor _rlnOriginX/YAngst found. "
+            "Defaulting to 0s."
+        )
+    return rot, trans
+
+
+def parse_ctf_star(input, img_d, img_apix):
+    stardata = Relionfile(input)
+    ctf_params = np.zeros((len(stardata), 9))
+    ctf_params[:, 0] = img_d
+    ctf_params[:, 1] = img_apix
+    for i, header in enumerate(
+        [
+            "_rlnDefocusU",
+            "_rlnDefocusV",
+            "_rlnDefocusAngle",
+            "_rlnVoltage",
+            "_rlnSphericalAberration",
+            "_rlnAmplitudeContrast",
+            "_rlnPhaseShift",
+        ]
+    ):
+        ctf_params[:, i + 2] = (
+            stardata.get_optics_values(header)
+        )
+    return ctf_params
+
+
 def grid_sample_with_value_threshold(data, interval, value_threshold, num_points=None):
     """
     Parameters:
@@ -269,115 +333,122 @@ if __name__ == "__main__":
     if use_cuda:
         torch.set_default_tensor_type(torch.cuda.FloatTensor)
 
+    parser = ArgumentParser(description="Analyzing")
+    parser.add_argument("--source_dir", type=str, default=None)
+    parser.add_argument("--data_dir", type=str, default=None)
+    parser.add_argument("--star_file", type=str, default=None)
+    parser.add_argument("--size", type=int, default=None)
+    parser.add_argument("--downsample_size", type=float, default=None)
+    parser.add_argument("--apix", type=float, default=None)
+    parser.add_argument("--consensus_map", type=str, default=None)
+    parser.add_argument("--map_thres", type=float, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
+    args = parser.parse_args(sys.argv[1:])
 
     ### cryobench IgG-1D
-    source_dir = "/home/data_8T/EMPAIR/cryobench/IgG-1D"
-    store_data_dir = "%s/images/snr0.01" % source_dir
-    metafile = "%s/snr0.01.star" % store_data_dir
-    ctf_dir = "%s/ctf.pkl" % source_dir
-    pose_dir = "%s/pose.pkl" % source_dir
+    source_dir = args.source_dir
+    store_data_dir = args.data_dir
+    metafile = args.star_file
     gaussian_dir = "%s/gaussian_preprocess" % source_dir
-    img_size = 128
-    img_apix = 3.0
+    img_size = args.size
+    img_down_size = args.downsample_size
+    img_apix = args.apix
 
-    with open(ctf_dir, 'rb') as f:
-        ctf = pickle.load(f)
-
-    with open(pose_dir, 'rb') as f:
-        poses = pickle.load(f)
-
-    rots, trans = poses[0], poses[1]
-    trans *= img_size
+    rots, trans = parse_pose_star(metafile, img_size, img_apix)
+    if img_down_size:
+        trans *= img_down_size / img_size
     rots = rots.reshape(-1, 9)
     orientations = np.concatenate([rots, trans], axis=1)
+    ctfs = parse_ctf_star(metafile, img_size, img_apix)
     save_ctf = "%s/ctf.npy" % gaussian_dir
     save_pose = "%s/poses.npy" % gaussian_dir
-    np.save(save_ctf, ctf)
+    np.save(save_ctf, ctfs)
     np.save(save_pose, orientations)
 
-    image_subset1 = "%s/img_stack.mrcs" % gaussian_dir
-    src1 = ImageSource.from_file(metafile, lazy=True, datadir=store_data_dir)
-    print(src1.shape)
+
+    # image_subset1 = "%s/img_stack.mrcs" % gaussian_dir
+    # src1 = ImageSource.from_file(metafile, lazy=True, datadir=store_data_dir)
+    # print(src1.shape)
     
-    header = MRCHeader.make_default_header(
-        nz=src1.n,
-        ny=img_size,
-        nx=img_size,
-        Apix=img_apix,
-        dtype=src1.dtype,
-        is_vol=False,
-    )
-    src1.write_mrc(
-        output_file=image_subset1,
-        header=header,
-        transform_fn=None,
-        chunksize=5000,
-    )
+    # header = MRCHeader.make_default_header(
+    #     nz=src1.n,
+    #     ny=img_size,
+    #     nx=img_size,
+    #     Apix=img_apix,
+    #     dtype=src1.dtype,
+    #     is_vol=False,
+    # )
+    # src1.write_mrc(
+    #     output_file=image_subset1,
+    #     header=header,
+    #     transform_fn=None,
+    #     chunksize=5000,
+    # )
 
 
-    init_map = "%s/vols/128_org/049.mrc" % source_dir
-    with mrcfile.open(init_map, 'r') as mrc:
-        vol = mrc.data 
+    # init_map = "%s/%s" % (source_dir, args.consensus_map)
+    # with mrcfile.open(init_map, 'r') as mrc:
+    #     vol = mrc.data 
 
-    density_thres = 0.0228
-    density_mask = vol > density_thres
-    offOrigin = np.array([0, 0, 0])
-    dVoxel = np.array([img_apix, img_apix, img_apix])
-    real_size = img_size * img_apix
-    sVoxel = np.array([real_size, real_size, real_size])
-    interval = (1, 1, 1)
-    sampled_indices = grid_sample_with_value_threshold(vol, interval, density_thres, num_points=None)
-    print(sampled_indices.shape)
-    sampled_positions = sampled_indices * dVoxel - sVoxel / 2 + offOrigin
+    # density_thres = 0.0228
+    # density_mask = vol > density_thres
+    # offOrigin = np.array([0, 0, 0])
+    # dVoxel = np.array([img_apix, img_apix, img_apix])
+    # real_size = img_size * img_apix
+    # sVoxel = np.array([real_size, real_size, real_size])
+    # interval = (1, 1, 1)
+    # sampled_indices = grid_sample_with_value_threshold(vol, interval, density_thres, num_points=None)
+    # print(sampled_indices.shape)
+    # sampled_positions = sampled_indices * dVoxel - sVoxel / 2 + offOrigin
 
-    sampled_densities = vol[
-        sampled_indices[:, 0],
-        sampled_indices[:, 1],
-        sampled_indices[:, 2],
-    ]
+    # sampled_densities = vol[
+    #     sampled_indices[:, 0],
+    #     sampled_indices[:, 1],
+    #     sampled_indices[:, 2],
+    # ]
 
-    out = np.concatenate([sampled_positions, sampled_densities[:, None]], axis=-1)
-    save_path = "%s/gaussians_1inter_049.npy" % gaussian_dir
-    np.save(save_path, out)
+    # out = np.concatenate([sampled_positions, sampled_densities[:, None]], axis=-1)
+    # save_path = "%s/gaussians_1inter_049.npy" % gaussian_dir
+    # np.save(save_path, out)
 
 
-    cfg_file = "%s/cfg.json" % gaussian_dir
-    meta_data = {}
-    meta_data['bbox'] = [[-1, -1, -1], [1, 1, 1]]
-    scanner_cfg = {}
-    
-    ### gaussian param
-    scanner_cfg['mode'] = "parallel"
-    scanner_cfg['filter'] = None
-    scanner_cfg['DSD'] = 7.0
-    scanner_cfg['DSO'] = 5.0
-    real_size = img_size * img_apix
-    scanner_cfg['nDetector'] = [img_size, img_size]
-    scanner_cfg['sDetector'] = [real_size, real_size]
-    scanner_cfg['nVoxel'] = [img_size, img_size, img_size]
-    scanner_cfg['sVoxel'] = [2.0, 2.0, 2.0]
-    scanner_cfg['offOrigin'] = [0, 0, 0]
-    scanner_cfg['offDetector'] = [0, 0, 0]
-    scanner_cfg['accuracy'] = 0.5
-    scanner_cfg['ctf'] = True
-    scanner_cfg['invert_contrast'] = True
-    scanner_cfg['pixelSize'] = img_apix
-    scanner_cfg['scale_min'] = 0.5 / img_size
-    scanner_cfg['scale_max'] = 1.0 / img_size
-    scanner_cfg['std'] = 8.7975
+    # cfg_file = "%s/cfg.json" % gaussian_dir
+    # meta_data = {}
+    # meta_data['bbox'] = [[-1, -1, -1], [1, 1, 1]]
+    # scanner_cfg = {}
 
-    ### network param
-    scanner_cfg['gaussian_embedding_dim'] = 32
-    scanner_cfg['qlayers'] = 3
-    scanner_cfg['qdim'] = 1024
-    scanner_cfg['zdim'] = 10
-    scanner_cfg['gaussian_kdim'] = 128
-    scanner_cfg['gaussian_klayers'] = 3
-    scanner_cfg['feature_dim'] = 256
-    scanner_cfg['feature_kdim'] = 128
-    scanner_cfg['feature_klayers'] = 2
+    # ### gaussian param
+    # scanner_cfg['mode'] = "parallel"
+    # scanner_cfg['filter'] = None
+    # scanner_cfg['DSD'] = 7.0
+    # scanner_cfg['DSO'] = 5.0
+    # real_size = img_size * img_apix
+    # scanner_cfg['nDetector'] = [img_size, img_size]
+    # scanner_cfg['sDetector'] = [real_size, real_size]
+    # scanner_cfg['nVoxel'] = [img_size, img_size, img_size]
+    # scanner_cfg['sVoxel'] = [2.0, 2.0, 2.0]
+    # scanner_cfg['offOrigin'] = [0, 0, 0]
+    # scanner_cfg['offDetector'] = [0, 0, 0]
+    # scanner_cfg['accuracy'] = 0.5
+    # scanner_cfg['ctf'] = True
+    # scanner_cfg['invert_contrast'] = True
+    # scanner_cfg['pixelSize'] = img_apix
+    # scanner_cfg['scale_min'] = 0.5 / img_size
+    # scanner_cfg['scale_max'] = 1.0 / img_size
+    # scanner_cfg['std'] = 8.7975
 
-    meta_data['cfg'] = scanner_cfg
+    # ### network param
+    # scanner_cfg['gaussian_embedding_dim'] = 32
+    # scanner_cfg['qlayers'] = 3
+    # scanner_cfg['qdim'] = 1024
+    # scanner_cfg['zdim'] = 10
+    # scanner_cfg['gaussian_kdim'] = 128
+    # scanner_cfg['gaussian_klayers'] = 3
+    # scanner_cfg['feature_dim'] = 256
+    # scanner_cfg['feature_kdim'] = 128
+    # scanner_cfg['feature_klayers'] = 2
 
-    with open(cfg_file, "w") as f:
-        json.dump(meta_data, f)
+    # meta_data['cfg'] = scanner_cfg
+
+    # with open(cfg_file, "w") as f:
+    #     json.dump(meta_data, f)
