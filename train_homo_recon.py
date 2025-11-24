@@ -406,6 +406,7 @@ if __name__ == "__main__":
     ### IgG-1D insight scale [0.5, 1.0] settings
     if "IgG-1D" in args.source_path:
         print("IgG-1D dataset")
+        args.epoch = 10
         args.position_lr_max_steps = 1_000_000
         args.density_lr_max_steps =  1_000_000
         args.scaling_lr_max_steps =  1_000_000
@@ -414,77 +415,7 @@ if __name__ == "__main__":
         args.densify_grad_threshold = 5.0e-5
         args.densify_scale_threshold = 0.0046
         args.max_scale = 0.005
-
-
-    ### 10180 scale [0.5, 1.0] settings 256
-    if "10180" in args.source_path:
-        print("EMPAIR 10180 dataset")
-        args.position_lr_max_steps = 3_270_000
-        args.density_lr_max_steps =  3_270_000
-        args.scaling_lr_max_steps =  3_270_000
-        args.rotation_lr_max_steps =  3_270_000
-        args.densify_until_iter =  3_270_000
-        args.densify_grad_threshold = 5.0e-5
-        args.densify_scale_threshold = 0.0078
-        args.max_scale = 0.008
         args.contribution_prune_ratio = 0.1
-        # args.max_num_gaussians = 10000
-
-
-    ### 10841 scale [0.25, 0.75] settings
-    if "10841" in args.source_path:
-        print("EMPAIR 10841 dataset")
-        args.position_lr_max_steps = 1_238_000
-        args.density_lr_max_steps =  1_238_000
-        args.scaling_lr_max_steps =  1_238_000
-        args.rotation_lr_max_steps =  1_238_000
-        args.densify_until_iter =  1_238_000
-        args.densify_grad_threshold = 5.0e-5
-        args.densify_scale_threshold = 0.006
-        args.max_scale = 0.0063
-        args.contribution_prune_ratio = 0.1
-
-
-    ### 10059 scale [0.5, 1.0] settings
-    if "10059" in args.source_path:
-        print("10059 dataset")
-        args.position_lr_max_steps = 2_187_870
-        args.density_lr_max_steps =  2_187_870
-        args.scaling_lr_max_steps =  2_187_870
-        args.rotation_lr_max_steps =  2_187_870
-        args.densify_until_iter =  2_187_870
-        args.densify_grad_threshold = 5.0e-5
-        args.densify_scale_threshold = 0.0043
-        args.max_scale = 0.0065
-        args.contribution_prune_ratio = 0.1
-
-
-    ### 10345 scale [0.5, 1.0] settings
-    if "10345" in args.source_path:
-        print("10345 dataset")
-        args.position_lr_max_steps = 842_660
-        args.density_lr_max_steps =  842_660
-        args.scaling_lr_max_steps =  842_660
-        args.rotation_lr_max_steps =  842_660
-        args.densify_until_iter =  842_660
-        args.densify_grad_threshold = 5.0e-5
-        args.densify_scale_threshold = 0.0048
-        args.max_scale = 0.005
-        args.contribution_prune_ratio = 0.3
-
-
-    ### gaoxiang_group scale [0.5, 1.0] settings
-    if "gaoxiang_group" in args.source_path:
-        print("gaoxiang_group dataset")
-        args.position_lr_max_steps = 1_065_640
-        args.density_lr_max_steps =  1_065_640
-        args.scaling_lr_max_steps =  1_065_640
-        args.rotation_lr_max_steps =  1_065_640
-        args.densify_until_iter =  1_065_640
-        args.densify_grad_threshold = 5.0e-5
-        args.densify_scale_threshold = 0.0019
-        args.max_scale = 0.002
-        args.contribution_prune_ratio = 0.3
 
 
     args_dict = vars(args)

@@ -34,7 +34,7 @@ pip install -e submodules/xray-gaussian-rasterization-voxelization
 Extract 2D particles images, orientations and contrast transfer function (ctf) parameters of particles from .star file (RELION format). (To be continued)
 
 ```
-Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PARTICLE IMAGE STACK] --star_file [RELION FILE] --size [IMAGE SIZE] --downsample_size [DOWNSAMPLE IMAGE SIZE] --apix [PIXEL SIZE] --consensus_map [DENSITY MAP] --map_thres [CONTOUR LEVEL] --output_dir [OUTPUT DIR]
+Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PARTICLE IMAGE STACK] --star_file [RELION FILE] --size [IMAGE SIZE] --downsample_size [DOWNSAMPLE IMAGE SIZE] --apix [PIXEL SIZE] --consensus_map [DENSITY MAP] --map_thres [CONTOUR LEVEL] --sample_interval [INTERVAL] --output_dir [OUTPUT DIR]
 
 ---options---
 --source_dir [str] : directory of project
@@ -45,6 +45,7 @@ Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PART
 --apix" [float] : raw pixel size
 --consensus_map [str] : consensus density map as the initial model
 --map_thres [float] : contour level of the consensus density map
+--sample_interval [int] : sampling interval for initial coordinates of 3D Gaussians
 --output_dir" [str] : directory of output files
 ```
 
