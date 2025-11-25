@@ -758,7 +758,7 @@ if __name__ == "__main__":
     group.add_argument("--no_window", action="store_true")
     group.add_argument("--start_checkpoint", type=str, default=None)
     group.add_argument("--output", type=str, default=None)
-    group.add_argument("--epoch", type=int, default=None)
+    group.add_argument("--epoch", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
 
     args = parser.parse_args(sys.argv[1:])
