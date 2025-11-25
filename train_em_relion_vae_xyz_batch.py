@@ -522,7 +522,8 @@ if __name__ == "__main__":
     parser.add_argument("--point", type=str, default=None)
     parser.add_argument("--cfg", type=str, default=None)
     parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--epoch", type=int, default=20)
     parser.add_argument("--no_window", action="store_true")
     args = parser.parse_args(sys.argv[1:])
 
@@ -531,7 +532,7 @@ if __name__ == "__main__":
 
     args.lr = 1e-4
     args.wd = 0
-    args.epoch = 20
+    # args.epoch = 20
 
     args_dict = vars(args)
     if args.config is not None:

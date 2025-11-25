@@ -56,7 +56,7 @@ This script outputs the (downsampled) particle stack (.mrcs), image poses (.npy)
 The GaussianEM can be trained with following command:
 
 ```
-Usage: python train_em_relion_vae_xyz_batch.py -s [DATA DIRECTORY] --particle_name [PARTICLE STACK NAME] --pose [POSES FILE] --ctf [CTF FILE] --point [GAUSSIAN FILE] --cfg [CONFIGURE FILE] --output [OUTPUT DIRECTORY] --batch [BATCH SIZE]
+Usage: python train_em_relion_vae_xyz_batch.py -s [DATA DIRECTORY] --particle_name [PARTICLE STACK NAME] --pose [POSES FILE] --ctf [CTF FILE] --point [GAUSSIAN FILE] --cfg [CONFIGURE FILE] --output [OUTPUT DIRECTORY] --batch [BATCH SIZE] --epoch [EPOCH NUM]
 
 ---options---
 -s [str] : directory of data
@@ -67,6 +67,7 @@ Usage: python train_em_relion_vae_xyz_batch.py -s [DATA DIRECTORY] --particle_na
 --cfg [str] : hyperparameters for Gaussians and heterogeneity network (.json)
 --output [str] : directory of ouput
 --batch [int] : batch size of inputted images during training
+--epoch [int] : number of training epochs
 ```
 
 Example command to train a heterogeneity network for 20 epochs on the IgG-1D dataset
@@ -79,7 +80,8 @@ Example: python train_em_relion_vae_xyz_batch.py -s dataset/IgG-1D \
     --point point_cloud.ply \
     --cfg cfg_scale_0.5_1.0.json \
     --output heter_zdim10 \
-    --batch 32
+    --batch 32 \
+    --epoch 20
 ```
 
 The training configure files and trained models for datasets EMPIAR-(10059, 10180, 10343, 10345, 10841, T6SS_effectors) are available via https://drive.google.com/drive/folders/1185kjegtrHnsF0R1N7DUXD04UjcqxFxw?usp=sharing

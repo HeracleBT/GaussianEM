@@ -1,17 +1,370 @@
 import numpy as np
 import torch
 import mrcfile
+import starfile
+import os.path as osp
 from typing import Optional
 from scipy.interpolate import RegularGridInterpolator
 from collections.abc import Iterable
 from data.relion import Relionfile, ImageSource
 import json
+from collections import defaultdict
 from utils.utils_em import R_from_relion
 from argparse import ArgumentParser
+from tqdm import tqdm
+import torch.nn.functional as F
 from utils.utils_em import ht2_center, iht2_center
 import os, sys
 from data.mrcfile_em import MRCHeader
 
+sys.path.append("./")
+from arguments import ModelParams_EM, OptimizationParams_EM, PipelineParams
+from utils.general_utils import safe_state
+from utils.general_utils import t2a
+
+from model.gaussian_model_insight import GaussianModel
+from model.render_query_EM import query, render
+from utils.utils_em import circular_mask, R_from_relion, relion_angle_to_matrix
+from data.dataset_em import ImageDataset, make_dataloader
+
+epsilon = 0.0000005
+
+class Particles:
+    gaussians: GaussianModel
+
+    def __init__(self, dataset_dir, particle_name, pose_file, ctf_file, point_cloud, cfg, window=True):
+        self.path = dataset_dir
+        self.particle_name = particle_name
+        self.images_dir = "%s/%s.mrcs" % (self.path, particle_name)
+        # self.orientation_dir = "%s/%s" % (self.path, pose_file)
+        self.orientation_dir = pose_file
+        # self.cfg_file = "%s/%s" % (self.path, cfg)
+        self.cfg_file = cfg
+        
+        self.init_cfg()
+        invert_data = True if self.scanner_cfg['invert_contrast'] else False
+        data = ImageDataset(
+            mrcfile=self.images_dir,
+            lazy=True,
+            invert_data=invert_data,
+            ind=None,
+            window=window,
+            datadir=None,
+        )
+        self.particle_num = data.N
+        self.images = data
+        self.particle_size = data.D
+        self.size_scale = self.particle_size / 2  ### scale vol into [-1, 1], stablize training
+
+        # self.ctf_dir = "%s/%s" % (self.path, ctf_file)
+        self.ctf_dir = ctf_file
+        self.ctf_param = np.load(self.ctf_dir)
+        self.ctf_mask = circular_mask(self.particle_size).cuda()
+        self.load_poses()
+        # self.point_dir = "%s/%s" % (self.path, point_cloud)
+        self.point_dir = point_cloud
+    
+    def load_poses(self):
+        poses = []
+        if "star" in self.orientation_dir:
+            df = starfile.read(self.orientation_dir)
+            particle_df = df['particles']
+            for i in range(self.particle_num):
+                iparticle = particle_df.iloc[i]
+                ipose_rot = relion_angle_to_matrix([iparticle.rlnAngleRot, iparticle.rlnAngleTilt, iparticle.rlnAnglePsi])
+                if "rlnOriginX" in particle_df.columns and "rlnOriginY" in particle_df.columns:
+                    ipose_tran = np.array([iparticle.rlnOriginX, iparticle.rlnOriginY]) / self.size_scale
+                elif "rlnOriginXAngst" in particle_df.columns and "rlnOriginYAngst" in particle_df.columns:
+                    ipose_tran = np.array([iparticle.rlnOriginXAngst, iparticle.rlnOriginYAngst]) / self.pixel_size / self.size_scale
+                poses.append([ipose_rot, ipose_tran])
+        elif "npy" in self.orientation_dir:
+            df = np.load(self.orientation_dir).astype(np.float64)
+            if df.shape[1] == 5:
+                angles = df[:, :3]
+                trans = df[:, 3:] / self.size_scale
+                rots = R_from_relion(angles)
+            elif df.shape[1] == 11:
+                rots = df[:, :9].reshape(-1, 3, 3)
+                trans = df[:, 9:] / self.size_scale
+            else:
+                print("Error: the dimension of pose")
+            for i in range(self.particle_num):
+                    poses.append([rots[i], trans[i]])
+        self.orientations = poses
+
+    def init_cfg(self):
+        with open(self.cfg_file, "r") as f:
+            meta_data = json.load(f)
+
+        self.scanner_cfg = meta_data['cfg']
+        if not "dVoxel" in self.scanner_cfg:
+            self.scanner_cfg["dVoxel"] = list(
+                np.array(self.scanner_cfg["sVoxel"])
+                / np.array(self.scanner_cfg["nVoxel"])
+            )
+        self.bbox = torch.tensor(meta_data['bbox'])
+        self.pixel_size = self.scanner_cfg['pixelSize']
+
+
+    def init_Gaussians(self, scale_bound=None, max_density=None):
+        out = np.load(self.point_dir)
+        self.gaussians = GaussianModel(scale_bound, max_density=max_density)
+        out[:, :3] /= self.size_scale * self.pixel_size
+        new_points = out.copy()
+        new_points[:, 0] = out[:, 2]  ### Note: z y x --> x y z
+        new_points[:, 2] = out[:, 0]
+
+        # self.gaussians.create_from_pcd(new_points[:, :3], new_points[:, 3:4], 1.0)
+
+        densities = new_points[:, 3:4] * 5
+        densities = np.clip(densities, None, 15.0)
+        self.gaussians.create_from_pcd(new_points[:, :3], densities, 1.0)   ### fit image
+
+
+    def save(self, epoch, queryfunc, output_path=None):
+        if output_path is None:
+            point_cloud_path = osp.join(
+                self.path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
+            )
+        else:
+            point_cloud_path = osp.join(
+                output_path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
+            )
+        self.gaussians.save_ply(osp.join(point_cloud_path, "point_cloud.ply"))
+        if queryfunc is not None:
+            vol_pred = queryfunc(self.gaussians)["vol"]
+            vol_pred_mrc = osp.join(point_cloud_path, "vol_pred.mrc")
+            with mrcfile.new(vol_pred_mrc, overwrite=True) as mrc:
+                mrc.set_data(t2a(vol_pred).astype(np.float32))
+                mrc.voxel_size = self.pixel_size
+
+    def save_prune(self, epoch, queryfunc, output_path=None):
+        if output_path is None:
+            point_cloud_path = osp.join(
+                self.path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
+            )
+        else:
+            point_cloud_path = osp.join(
+                output_path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
+            )
+        self.gaussians.save_ply(osp.join(point_cloud_path, "point_cloud_after_prune.ply"))
+        if queryfunc is not None:
+            vol_pred = queryfunc(self.gaussians)["vol"]
+            vol_pred_mrc = osp.join(point_cloud_path, "vol_pred_after_prune.mrc")
+            with mrcfile.new(vol_pred_mrc, overwrite=True) as mrc:
+                mrc.set_data(t2a(vol_pred).astype(np.float32))
+                mrc.voxel_size = self.pixel_size
+
+
+def real_space_cryonerf(output, gt, ctf, mask=None, ctf_sign=False):
+    D = output.shape[-1]
+    output = torch.fft.rfft2(torch.fft.fftshift(output, dim=(-2, -1)), dim=(-2, -1))
+    ctf = torch.fft.fftshift(ctf, dim=(-2, -1))
+    half_ctf = ctf[..., :D//2+1]
+    output = torch.multiply(output, half_ctf)
+    output = torch.fft.ifftshift(torch.fft.irfft2(output, dim=(-2, -1)), dim=(-2, -1))
+    if ctf_sign:
+        gt = torch.fft.rfft2(torch.fft.fftshift(gt, dim=(-2, -1)), dim=(-2, -1))
+        gt = torch.multiply(gt, torch.sign(half_ctf))
+        gt = torch.fft.ifftshift(torch.fft.irfft2(gt, dim=(-2, -1)), dim=(-2, -1))
+    if mask is not None:
+        mask = mask.view(1, D, D)
+        return F.l1_loss(output[mask == 1], gt[mask == 1])
+        # return F.mse_loss(output[mask == 1], gt[mask == 1])
+    return F.l1_loss(output, gt)
+    # return F.mse_loss(output, gt)
+
+
+def prune_low_contribution_gaussians(gaussians, orientations, particle_size, K=5, prune_ratio=0.1):
+    top_list = [None, ] * K
+    for i, pose in enumerate(orientations):
+        trans_pkg = render(pose, gaussians, particle_size, record_transmittance=True)
+        trans = trans_pkg.detach()
+        if top_list[0] is not None:
+            m = trans > top_list[0]
+            if m.any():
+                for i in range(K - 1):
+                    top_list[K - 1 - i][m] = top_list[K - 2 - i][m]
+                top_list[0][m] = trans[m]
+        else:
+            top_list = [trans.clone() for _ in range(K)]
+
+        del trans_pkg
+
+    contribution = torch.stack(top_list, dim=-1).mean(-1)
+    tile = torch.quantile(contribution, prune_ratio)
+    prune_mask = contribution < tile
+    gaussians.prune_points(prune_mask)
+    torch.cuda.empty_cache()
+    return
+
+
+def training_EM_homo(
+    dataset: Particles,
+    scene: ModelParams_EM,
+    opt: OptimizationParams_EM,
+    pipe: PipelineParams,
+    checkpoint,
+    output_dir,
+    batch_size
+):
+    first_iter = 0
+    # Set up some parameters
+    scanner_cfg = dataset.scanner_cfg
+    bbox = dataset.bbox
+    volume_to_world = max(scanner_cfg["sVoxel"])
+    max_scale = opt.max_scale * volume_to_world if opt.max_scale else None
+    densify_scale_threshold = (
+        opt.densify_scale_threshold * volume_to_world
+        if opt.densify_scale_threshold
+        else None
+    )
+    scale_bound = None
+    if scanner_cfg["scale_max"] and scanner_cfg["scale_min"]:
+        scale_bound = np.array([scanner_cfg["scale_min"], scanner_cfg["scale_max"]]) * volume_to_world
+
+    queryfunc = lambda x: query(
+        x,
+        scanner_cfg["offOrigin"],
+        scanner_cfg["nVoxel"],
+        scanner_cfg["sVoxel"],
+        reorder=True
+    )
+
+    # Set up Gaussians
+    dataset.init_Gaussians(scale_bound=scale_bound)
+    dataset.gaussians.training_setup(opt)
+    gaussians = dataset.gaussians
+    std = scanner_cfg['std']
+
+    if checkpoint is not None:
+        (model_params, first_iter) = torch.load(checkpoint)
+        gaussians.restore(model_params, opt)
+
+    if output_dir is not None:
+        save_path = osp.join(dataset.path, output_dir)
+
+    # Train
+    iter_start = torch.cuda.Event(enable_timing=True)
+    iter_end = torch.cuda.Event(enable_timing=True)
+    ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.particle_name}")
+    os.makedirs(ckpt_save_path, exist_ok=True)
+    total_iterations = opt.epoch * dataset.particle_num
+    progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)
+    progress_bar.update(first_iter)
+    first_iter += 1
+    fourier_mask = dataset.ctf_mask
+
+    data_generator = make_dataloader(
+        dataset.images,
+        batch_size=1,
+        num_workers=1,
+        shuffler_size=0,
+        shuffle=True,
+    )
+
+    batch_num = batch_size
+    count = 0
+    loss = defaultdict(float)
+    loss['total'] = 0.0
+
+    for epoch in range(opt.epoch):
+
+        for iteration, minibatch in enumerate(data_generator):
+            iter_start.record()
+            count += 1
+            # Update learning rate
+            true_ite = iteration + epoch * dataset.particle_num + 1
+            gaussians.update_learning_rate(true_ite)
+            ind = minibatch[-1]
+            original_image = minibatch[0].cuda()
+            orientation = dataset.orientations[ind]
+            # print(dataset.ctf_param[ind].shape)
+            ctf_setting = ctf_params(dataset.ctf_param[ind])
+            ctf = compute_single_ctf(dataset.particle_size, ctf_setting).float()
+            ctf *= fourier_mask
+
+            # Render projection
+            render_pkg = render(orientation, gaussians, dataset.particle_size)
+            image, viewspace_point_tensor, visibility_filter, radii = (
+                render_pkg["render"],
+                render_pkg["viewspace_points"],
+                render_pkg["visibility_filter"],
+                render_pkg["radii"],
+            )
+
+            # Compute loss
+            gt_image = original_image.cuda()
+            gt_image = gt_image / std
+            render_loss = real_space_cryonerf(image, gt_image.detach(), ctf.detach(), ctf_sign=False)
+
+            total_loss = render_loss / batch_num
+            total_loss.backward()
+
+            loss["render"] += render_loss.item()
+
+            if count % batch_num == 0:
+                count = 0
+                loss['total'] = loss['render']
+
+                progress_bar.set_postfix(
+                    {
+                        "loss": f"{loss['total'] / batch_num:.1e}",
+                        "render": f"{loss['render'] / batch_num:.1e}",
+                        "pts": f"{gaussians.get_density.shape[0]:2.1e}",
+                    }
+                )
+                progress_bar.update(batch_num)
+
+                for k in loss.keys():
+                    loss[k] = 0.0
+            else:
+                continue
+
+            iter_end.record()
+
+            with torch.no_grad():
+                # Adaptive control
+                gaussians.max_radii2D[visibility_filter] = torch.max(
+                    gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
+                )
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                if true_ite < opt.densify_until_iter:
+                    if (
+                        true_ite > opt.densify_from_iter
+                        and true_ite % opt.densification_interval == 0
+                    ):  
+                        gaussians.densify_and_prune(
+                            opt.densify_grad_threshold,
+                            opt.density_min_threshold,
+                            opt.max_screen_size,
+                            max_scale,
+                            opt.max_num_gaussians,
+                            densify_scale_threshold,
+                            bbox,
+                        )
+
+                if gaussians.get_density.shape[0] == 0:
+                    raise ValueError(
+                        "No Gaussian left. Change adaptive control hyperparameters!"
+                    )
+
+                # Optimization
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none=True)
+
+                # Logging
+                metrics = {}
+                for l in loss:
+                    if isinstance(loss[l], float):
+                        metrics["loss_" + l] = loss[l]
+                    else:
+                        metrics["loss_" + l] = loss[l].item()
+                for param_group in gaussians.optimizer.param_groups:
+                    metrics[f"lr_{param_group['name']}"] = param_group["lr"]
+
+        tqdm.write(f"[ITER {epoch}] Saving Gaussians, perform {true_ite} iterations")
+        dataset.save(epoch, queryfunc, save_path)
 
 class ctf_params:
 
@@ -60,7 +413,23 @@ class ctf_params:
                 self.ps = parameters[8]
             self.b = None
 
-
+def compute_single_ctf(D, ctf_params):
+    freqs = np.arange(-D / 2, D / 2) / (ctf_params.Apix * D)
+    x0, x1 = np.meshgrid(freqs, freqs)
+    freqs = torch.tensor(np.stack([x0.ravel(), x1.ravel()], axis=1)).cuda()
+    ctf = compute_ctf(
+        freqs,
+        torch.Tensor([ctf_params.dfu]).reshape(-1, 1).cuda(),
+        torch.Tensor([ctf_params.dfv]).reshape(-1, 1).cuda(),
+        torch.Tensor([ctf_params.ang]).reshape(-1, 1).cuda(),
+        torch.Tensor([ctf_params.kv]).reshape(-1, 1).cuda(),
+        torch.Tensor([ctf_params.cs]).reshape(-1, 1).cuda(),
+        torch.Tensor([ctf_params.wgh]).reshape(-1, 1).cuda(),
+        phase_shift = torch.Tensor([ctf_params.ps]).reshape(-1, 1).cuda(),
+        bfactor = torch.Tensor([ctf_params.b]).reshape(-1, 1).cuda() if ctf_params.b is not None else None,
+    )
+    ctf = ctf.reshape((D, D))
+    return ctf
 
 def compute_ctf(
     freqs: torch.Tensor,
@@ -113,42 +482,6 @@ def compute_ctf(
         ctf *= torch.exp(-bfactor / 4 * s2)
     return ctf
 
-
-def calculate_dose_weights(ntilts, D, pixel_size, dose_per_A2_per_tilt, voltage):
-    '''
-    code adapted from Grigorieff lab summovie_1.0.2/src/core/electron_dose.f90
-    see also Grant and Grigorieff, eLife (2015) DOI: 10.7554/eLife.06980
-    assumes even-sized FFT (i.e. non-ht-symmetrized, DC component is bottom-right of central 4 px)
-    '''
-    cumulative_doses = dose_per_A2_per_tilt * np.arange(1, ntilts+1)
-    dose_weights = np.zeros((ntilts, D, D))
-    fourier_pixel_sizes = 1.0 / (np.array([D, D]))  # in units of 1/px
-    box_center_indices = np.array([D, D]) // 2
-    critical_dose_at_dc = 0.001 * (2 ** 31) # shorthand way to ensure dc component is always weighted ~1
-    voltage_scaling_factor = 1.0 if voltage == 300 else 0.8  # 1.0 for 300kV, 0.8 for 200kV microscopes
-
-    for k, dose_at_end_of_tilt in enumerate(cumulative_doses):
-
-        for j in range(D):
-            y = ((j - box_center_indices[1]) * fourier_pixel_sizes[1])
-
-            for i in range(D):
-                x = ((i - box_center_indices[0]) * fourier_pixel_sizes[0])
-
-                if ((i, j) == box_center_indices).all():
-                    spatial_frequency_critical_dose = critical_dose_at_dc
-                else:
-                    spatial_frequency = np.sqrt(x ** 2 + y ** 2) / pixel_size  # units of 1/A
-                    spatial_frequency_critical_dose = (0.24499 * spatial_frequency ** (
-                        -1.6649) + 2.8141) * voltage_scaling_factor  # eq 3 from DOI: 10.7554/eLife.06980
-
-                dose_weights[k, j, i] = np.exp((-0.5 * dose_at_end_of_tilt) / spatial_frequency_critical_dose)  # eq 5 from DOI: 10.7554/eLife.06980
-
-    assert dose_weights.min() >= 0.0
-    assert dose_weights.max() <= 1.0
-    return dose_weights
-
-
 def compute_single_ctf(D, ctf_params):
     freqs = np.arange(-D / 2, D / 2) / (ctf_params.Apix * D)
     x0, x1 = np.meshgrid(freqs, freqs)
@@ -166,26 +499,6 @@ def compute_single_ctf(D, ctf_params):
     )
     ctf = ctf.reshape((D, D))
     return ctf
-
-
-def compute_full_ctf(D, Nimg, ctf_params):
-    freqs = np.arange(-D / 2, D / 2) / (ctf_params.Apix * D)
-    x0, x1 = np.meshgrid(freqs, freqs)
-    freqs = torch.tensor(np.stack([x0.ravel(), x1.ravel()], axis=1)).cuda()
-    ctf = compute_ctf(
-        freqs,
-        torch.Tensor([ctf_params.dfu]).reshape(-1, 1),
-        torch.Tensor([ctf_params.dfv]).reshape(-1, 1),
-        torch.Tensor([ctf_params.ang]).reshape(-1, 1),
-        torch.Tensor([ctf_params.kv]).reshape(-1, 1),
-        torch.Tensor([ctf_params.cs]).reshape(-1, 1),
-        torch.Tensor([ctf_params.wgh]).reshape(-1, 1),
-        phase_shift = torch.Tensor([ctf_params.ps]).reshape(-1, 1),
-        bfactor = torch.Tensor([ctf_params.b]).reshape(-1, 1),
-    )
-    ctf = ctf.reshape((D, D))
-    df = np.stack([np.ones(Nimg) * ctf_params.dfu, np.ones(Nimg) * ctf_params.dfv], axis=1)
-    return ctf, df
 
 
 def standardize(images):
@@ -404,12 +717,14 @@ def downsample_mrc_images(
 
 if __name__ == "__main__":
 
-    use_cuda = torch.cuda.is_available()
-    device = torch.device('cuda' if use_cuda else 'cpu')
-    if use_cuda:
-        torch.set_default_tensor_type(torch.cuda.FloatTensor)
+    # use_cuda = torch.cuda.is_available()
+    # device = torch.device('cuda' if use_cuda else 'cpu')
+    # if use_cuda:
+    #     torch.set_default_tensor_type(torch.cuda.FloatTensor)
+    #     print('Using cuda')
 
     parser = ArgumentParser(description="Extract particle info")
+    
     parser.add_argument("--source_dir", type=str, default=None)
     parser.add_argument("--data_dir", type=str, default=None)
     parser.add_argument("--star_file", type=str, default=None)
@@ -419,12 +734,12 @@ if __name__ == "__main__":
     parser.add_argument("--consensus_map", type=str, default=None)
     parser.add_argument("--map_thres", type=float, default=None)
     parser.add_argument("--sample_interval", type=int, default=None)
-    parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("-b",type=int,default=5000,help="Batch size for processing images (default: %(default)s)")
+    parser.add_argument("--particle_name", type=str, default='image_stack')
+    parser.add_argument("-downsample_b",type=int,default=5000,help="Batch size for processing images (default: %(default)s)")
     parser.add_argument("--scale_min", type=float, default=0.5)
     parser.add_argument("--scale_max", type=float, default=1.0)
 
-    group = parser.add_argument_group("Network params")
+    group = parser.add_argument_group(description="Network params")
     group.add_argument("--gaussian_embedding_dim", type=int, default=32)
     group.add_argument("--qlayers", type=int, default=2)
     group.add_argument("--qdim", type=int, default=1024)
@@ -434,6 +749,18 @@ if __name__ == "__main__":
     group.add_argument("--feature_dim", type=int, default=256)
     group.add_argument("--feature_kdim", type=int, default=128)
     group.add_argument("--feature_klayers", type=int, default=2)
+    
+    group = parser.add_argument_group(description="Training script parameters")
+    lp = ModelParams_EM(parser)
+    op = OptimizationParams_EM(parser)
+    pp = PipelineParams(parser)
+    group.add_argument("--detect_anomaly", action="store_true", default=False)
+    group.add_argument("--no_window", action="store_true")
+    group.add_argument("--start_checkpoint", type=str, default=None)
+    group.add_argument("--output", type=str, default=None)
+    group.add_argument("--epoch", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=4)
+
     args = parser.parse_args(sys.argv[1:])
     
     ### base info
@@ -446,6 +773,8 @@ if __name__ == "__main__":
     img_size = args.size
     img_down_size = args.downsample_size
     img_apix = args.apix
+
+    print("Extracting particles and information")
 
     ### extract orientations, ctfs
     rots, trans = parse_pose_star(metafile, img_size, img_apix)
@@ -468,12 +797,14 @@ if __name__ == "__main__":
         )
     if args.downsample_size % 2 != 0:
         raise ValueError(f"New box size {args.downsample_size=} is not even!")
-    downsample_mrc_images(src, args.downsample_size, os.path.join(args.output_dir, 'image_stack.mrcs'), args.b)
+    downsample_mrc_images(src, args.downsample_size, os.path.join(gaussian_dir, args.particle_name+'.mrcs'), args.downsample_b)
 
-    with mrcfile.open(os.path.join(args.output_dir, 'image_stack.mrcs'), 'r') as mrc:
+    with mrcfile.open(os.path.join(gaussian_dir, args.particle_name+'.mrcs'), 'r') as mrc:
         downsample_particle = mrc.data
         std = np.std(downsample_particle)
         # print(std)
+
+    print("Sampling initial Gaussians")
 
     ### sample consensus map
     if not os.path.isabs(args.consensus_map):
@@ -499,13 +830,11 @@ if __name__ == "__main__":
         sampled_indices[:, 2],
     ]
 
-    sampled_max = np.max(sampled_densities)
-    if sampled_max < 10.0:
-        sampled_densities *= 10.0 / sampled_max
-
     out = np.concatenate([sampled_positions, sampled_densities[:, None]], axis=-1)
-    save_path = "%s/gaussians_%dinter.npy" % (gaussian_dir, interval)
-    np.save(save_path, out)
+    save_gauss = "%s/gaussians_%dinter.npy" % (gaussian_dir, interval)
+    np.save(save_gauss, out)
+
+    print("Generating configure file")
 
     ### configure file
     cfg_file = "%s/cfg.json" % gaussian_dir
@@ -547,3 +876,35 @@ if __name__ == "__main__":
     meta_data['cfg'] = scanner_cfg
     with open(cfg_file, "w") as f:
         json.dump(meta_data, f)
+    
+    ###homo_recon_part
+    
+    print("Optimizing " + args.model_path)
+
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+
+    window_flag = not args.no_window
+    dataset = Particles(gaussian_dir, args.particle_name, save_pose, save_ctf, save_gauss, cfg_file, window=window_flag)
+
+    args.position_lr_max_steps = args.epoch * dataset.particle_num
+    args.density_lr_max_steps =  args.epoch * dataset.particle_num
+    args.scaling_lr_max_steps =  args.epoch * dataset.particle_num
+    args.rotation_lr_max_steps = args.epoch * dataset.particle_num
+    args.densify_until_iter =  args.epoch * dataset.particle_num
+    args.densify_grad_threshold = 5.0e-5
+    args.densify_scale_threshold = scanner_cfg['scale_max']
+    args.max_scale = scanner_cfg['scale_max'] + 0.00025
+    args.contribution_prune_ratio = 0.1
+
+    training_EM_homo(
+        dataset,
+        lp.extract(args),
+        op.extract(args),
+        pp.extract(args),
+        args.start_checkpoint,
+        args.output,
+        args.batch_size
+    )
+    print("Gaussians trained complete.")
+    
+    os.system('cp ' + osp.join(gaussian_dir, f"point_cloud_{args.particle_name}", f"epoch_{args.epoch - 1}", "point_cloud.ply") + ' ' + gaussian_dir)
