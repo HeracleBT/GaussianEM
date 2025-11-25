@@ -14,7 +14,6 @@ import torch.nn.functional as F
 sys.path.append("./")
 from arguments import ModelParams_EM, OptimizationParams_EM, PipelineParams
 from utils.general_utils import safe_state
-from utils.general_utils import load_config
 from utils.general_utils import t2a
 
 from model.gaussian_model_insight import GaussianModel
@@ -388,7 +387,6 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_epochs", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
-    parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--particle_name", type=str, default=None)
     parser.add_argument("--pose", type=str, default=None)
     parser.add_argument("--ctf", type=str, default=None)
@@ -402,28 +400,7 @@ if __name__ == "__main__":
     args.save_epochs.append(args.epoch)
     safe_state(args.quiet)
 
-
-    ### IgG-1D insight scale [0.5, 1.0] settings
-    if "IgG-1D" in args.source_path:
-        print("IgG-1D dataset")
-        args.epoch = 10
-        args.position_lr_max_steps = 1_000_000
-        args.density_lr_max_steps =  1_000_000
-        args.scaling_lr_max_steps =  1_000_000
-        args.rotation_lr_max_steps =  1_000_000
-        args.densify_until_iter =  1_000_000
-        args.densify_grad_threshold = 5.0e-5
-        args.densify_scale_threshold = 0.0046
-        args.max_scale = 0.005
-        args.contribution_prune_ratio = 0.1
-
-
     args_dict = vars(args)
-    if args.config is not None:
-        print(f"Loading configuration file from {args.config}")
-        cfg = load_config(args.config)
-        for key in list(cfg.keys()):
-            args_dict[key] = cfg[key]
 
     print("Optimizing " + args.model_path)
 
@@ -433,6 +410,17 @@ if __name__ == "__main__":
 
     window_flag = not args.no_window
     dataset = Particles(args.source_path, args.particle_name, args.pose, args.ctf, args.point, args.cfg, window=window_flag)
+
+    args.position_lr_max_steps = args.epoch * dataset.particle_num
+    args.density_lr_max_steps =  args.epoch * dataset.particle_num
+    args.scaling_lr_max_steps =  args.epoch * dataset.particle_num
+    args.rotation_lr_max_steps = args.epoch * dataset.particle_num
+    args.densify_until_iter =  args.epoch * dataset.particle_num
+    args.densify_grad_threshold = 5.0e-5
+    args.densify_scale_threshold = dataset.scale_max
+    args.max_scale = dataset.scale_max + 0.0002
+    args.contribution_prune_ratio = 0.1
+
     training_EM_homo(
         dataset,
         lp.extract(args),
