@@ -248,8 +248,8 @@ def training_EM_homo(
     # Train
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
-    ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.particle_name}")
-    os.makedirs(ckpt_save_path, exist_ok=True)
+    # ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.particle_name}")
+    # os.makedirs(ckpt_save_path, exist_ok=True)
     total_iterations = total_epoch * dataset.particle_num
     progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)
     progress_bar.update(first_iter)
