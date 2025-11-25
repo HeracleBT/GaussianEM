@@ -242,8 +242,9 @@ def training_EM_homo(
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
 
-    if output_dir is not None:
-        save_path = osp.join(dataset.path, output_dir)
+    # if output_dir is not None:
+    #     save_path = osp.join(dataset.path, output_dir)
+    save_path = dataset.path
 
     # Train
     iter_start = torch.cuda.Event(enable_timing=True)
