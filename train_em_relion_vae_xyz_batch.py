@@ -93,7 +93,8 @@ def training_EM_heter(
     opt: OptimizationParams_EM,
     checkpoint,
     output_dir,
-    batch_size
+    batch_size,
+    total_epoch
 ):
     first_iter = 0
     # seed_torch()
@@ -144,7 +145,7 @@ def training_EM_heter(
     # Train
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
-    total_iterations = opt.epoch * dataset.particle_num
+    total_iterations = total_epoch * dataset.particle_num
     progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)
     progress_bar.update(first_iter)
     first_iter += 1
@@ -214,7 +215,7 @@ def training_EM_heter(
 
     record_loss = defaultdict(float)
 
-    for epoch in range(opt.epoch):
+    for epoch in range(total_epoch):
 
         model.train()
         for iteration, minibatch in enumerate(data_generator):
@@ -554,7 +555,8 @@ if __name__ == "__main__":
         op.extract(args),
         args.start_checkpoint,
         args.output,
-        args.batch_size
+        args.batch_size,
+        args.epoch
     )
 
     print("Gaussians trained complete.")

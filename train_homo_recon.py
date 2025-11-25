@@ -197,7 +197,8 @@ def training_EM_homo(
     pipe: PipelineParams,
     checkpoint,
     output_dir,
-    batch_size
+    batch_size,
+    epoch,
 ):
     first_iter = 0
     # Set up some parameters
@@ -241,7 +242,7 @@ def training_EM_homo(
     iter_end = torch.cuda.Event(enable_timing=True)
     ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.particle_name}")
     os.makedirs(ckpt_save_path, exist_ok=True)
-    total_iterations = opt.epoch * dataset.particle_num
+    total_iterations = epoch * dataset.particle_num
     progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)
     progress_bar.update(first_iter)
     first_iter += 1
@@ -260,7 +261,7 @@ def training_EM_homo(
     loss = defaultdict(float)
     loss['total'] = 0.0
 
-    for epoch in range(opt.epoch):
+    for epoch in range(epoch):
 
         for iteration, minibatch in enumerate(data_generator):
             iter_start.record()
@@ -358,7 +359,7 @@ def training_EM_homo(
         tqdm.write(f"[ITER {epoch}] Saving Gaussians, perform {true_ite} iterations")
         dataset.save(epoch, queryfunc, save_path)
 
-        # # if epoch < opt.epoch // 2:
+        # # if epoch < epoch // 2:
         # if epoch < 6:
 
         #     total_sample_indices = [i for i in range(dataset.particle_num)]
@@ -428,6 +429,7 @@ if __name__ == "__main__":
         pp.extract(args),
         args.start_checkpoint,
         args.output,
-        args.batch_size
+        args.batch_size,
+        args.epoch
     )
     print("Gaussians trained complete.")

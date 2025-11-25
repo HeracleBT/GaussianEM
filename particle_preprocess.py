@@ -206,7 +206,8 @@ def training_EM_homo(
     pipe: PipelineParams,
     checkpoint,
     output_dir,
-    batch_size
+    batch_size,
+    total_epoch
 ):
     first_iter = 0
     # Set up some parameters
@@ -249,7 +250,7 @@ def training_EM_homo(
     iter_end = torch.cuda.Event(enable_timing=True)
     ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.particle_name}")
     os.makedirs(ckpt_save_path, exist_ok=True)
-    total_iterations = opt.epoch * dataset.particle_num
+    total_iterations = total_epoch * dataset.particle_num
     progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)
     progress_bar.update(first_iter)
     first_iter += 1
@@ -268,7 +269,7 @@ def training_EM_homo(
     loss = defaultdict(float)
     loss['total'] = 0.0
 
-    for epoch in range(opt.epoch):
+    for epoch in range(total_epoch):
 
         for iteration, minibatch in enumerate(data_generator):
             iter_start.record()
@@ -757,7 +758,7 @@ if __name__ == "__main__":
     group.add_argument("--detect_anomaly", action="store_true", default=False)
     group.add_argument("--no_window", action="store_true")
     group.add_argument("--start_checkpoint", type=str, default=None)
-    group.add_argument("--output", type=str, default=None)
+    group.add_argument("--output", type=str, default="gaussian_preprocess")
     group.add_argument("--epoch", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
 
@@ -767,7 +768,7 @@ if __name__ == "__main__":
     source_dir = args.source_dir
     store_data_dir = args.data_dir
     metafile = args.star_file
-    gaussian_dir = "%s/gaussian_preprocess" % source_dir
+    gaussian_dir = "%s/%s" % (source_dir, args.output)
     if not os.path.exists(gaussian_dir):
         os.makedirs(gaussian_dir)
     img_size = args.size
@@ -903,7 +904,8 @@ if __name__ == "__main__":
         pp.extract(args),
         args.start_checkpoint,
         args.output,
-        args.batch_size
+        args.batch_size,
+        args.epoch
     )
     print("Gaussians trained complete.")
     
