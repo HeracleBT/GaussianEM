@@ -418,7 +418,7 @@ if __name__ == "__main__":
     args.densify_until_iter =  args.epoch * dataset.particle_num
     args.densify_grad_threshold = 5.0e-5
     args.densify_scale_threshold = dataset.scale_max
-    args.max_scale = dataset.scale_max + 0.0002
+    args.max_scale = dataset.scale_max + 0.00025
     args.contribution_prune_ratio = 0.1
 
     training_EM_homo(
