@@ -36,7 +36,7 @@ pip install -e submodules/xray-gaussian-rasterization-voxelization
 - Output downsampled particle images (.mrcs) based on the target image size (*--downsample_size*).
 - Sample the valid coordinates from consensus map (*--consensus_map*) based on the contour level value (*--map_thres*) and sampling interval value (*--sample_interval*). For particle image (*--size*) larger than 256 pixels, the *--sample_interval* is set to 2, else 1.
 - Generate the configure file (.json) for model training.
-- Generate the initial Gaussians information (.ply) based on the downsampled image stack and the valid coordinates information.
+- Generate the initial Gaussians information (.ply)
 ```
 Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PARTICLE IMAGE STACK] --star_file [RELION FILE] --size [IMAGE SIZE] --downsample_size [DOWNSAMPLE IMAGE SIZE] --apix [PIXEL SIZE] --consensus_map [DENSITY MAP] --map_thres [CONTOUR LEVEL] --sample_interval [INTERVAL] --output [OUTPUT FOLDER NAME] --epoch [EPOCH NUM]
 
