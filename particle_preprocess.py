@@ -797,9 +797,9 @@ if __name__ == "__main__":
     with mrcfile.open(os.path.join(gaussian_dir, args.particle_name+'.mrcs'), 'r') as mrc:
         downsample_particle = mrc.data
         if invert_flag:
-            std = np.std(downsample_particle)
-        else:
             std = np.std(downsample_particle * -1)
+        else:
+            std = np.std(downsample_particle)
         # print(std)
 
     print("Sampling initial Gaussians")
@@ -827,6 +827,10 @@ if __name__ == "__main__":
         sampled_indices[:, 1],
         sampled_indices[:, 2],
     ]
+
+    sampled_max = np.max(sampled_densities)
+    if sampled_max < 10:
+        sampled_densities *= 10 / sampled_max
 
     out = np.concatenate([sampled_positions, sampled_densities[:, None]], axis=-1)
     save_gauss = "%s/gaussians_%dinter.npy" % (gaussian_dir, interval)
