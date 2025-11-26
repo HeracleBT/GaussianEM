@@ -85,7 +85,7 @@ class OptimizationParams_EM(ParamGroup):
         self.density_lr_init = 0.001
         self.density_lr_final = 0.00001
         self.density_lr_max_steps = 1310_000
-        self.scaling_lr_init = 0.0001
+        self.scaling_lr_init = 0.001
         self.scaling_lr_final = 0.00001
         self.scaling_lr_max_steps = 1310_000
         self.rotation_lr_init = 0.001
