@@ -29,12 +29,16 @@ pip install -e submodules/xray-gaussian-rasterization-voxelization
 
 ## Usage
 
-### Preprocess particle stack, poses, ctf information
+### Data Preprocess 
+<!-- particle stack, poses, ctf parameters, initial Gaussians information, training configure file -->
 
-Extract 2D particles images, orientations and contrast transfer function (ctf) parameters of particles from .star file (RELION format). (To be continued)
-
+- Extract pose (.npy) and contrast transfer function (ctf) parameters (.npy) of particles from .star file (RELION format). 
+- Output downsampled particle images (.mrcs) based on the target image size (*--downsample_size*).
+- Sample the valid coordinates from consensus map (*--consensus_map*) based on the contour level value (*--map_thres*) and sampling interval value (*--sample_interval*). For particle image (*--size*) larger than 256 pixels, the *--sample_interval* is set to 2, else 1.
+- Generate the configure file (.json) for model training.
+- Generate the initial Gaussians information (.ply) based on the downsampled image stack and the valid coordinates information.
 ```
-Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PARTICLE IMAGE STACK] --star_file [RELION FILE] --size [IMAGE SIZE] --downsample_size [DOWNSAMPLE IMAGE SIZE] --apix [PIXEL SIZE] --consensus_map [DENSITY MAP] --map_thres [CONTOUR LEVEL] --sample_interval [INTERVAL] --output_dir [OUTPUT DIR]
+Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PARTICLE IMAGE STACK] --star_file [RELION FILE] --size [IMAGE SIZE] --downsample_size [DOWNSAMPLE IMAGE SIZE] --apix [PIXEL SIZE] --consensus_map [DENSITY MAP] --map_thres [CONTOUR LEVEL] --sample_interval [INTERVAL] --output [OUTPUT FOLDER NAME] --epoch [EPOCH NUM]
 
 ---options---
 --source_dir [str] : directory of project
@@ -42,11 +46,31 @@ Usage: python particle_preprocess.py --source_dir [PROJECT DIR] --data_dir [PART
 --star_file [str] : .star file 
 --size [int] : raw image size
 --downsample_size [int] : expected size after downsampling
---apix" [float] : raw pixel size
+--apix [float] : raw pixel size
+--no_invert [store_true] : do not invert data sign
 --consensus_map [str] : consensus density map as the initial model
 --map_thres [float] : contour level of the consensus density map
 --sample_interval [int] : sampling interval for initial coordinates of 3D Gaussians
---output_dir" [str] : directory of output files
+--output [str] : folder name under project directory
+--downsample_batch [int] : batch size for downsampling images, default: 5000
+--scale_min [float] : default: 0.5
+--scale_max [float] : default: 1
+
+---Network parameters----
+> Image encoder 
+--qdim [int] : number of nodes in image encoding layers
+--zdim [int] : dimension of image latent variable
+> Gaussian encoder 
+--gaussian_kdim [int] : number of nodes in Gaussian encoding layers
+--gaussian_embedding_dim [int] : dimension of Gaussian latent variable 
+> Decoder 
+--feature_kdim [int] : number of nodes in decoder layers (related to the concated feature)
+--feature_dim [int] : number of nodes in decoder layers (related to density, scaling, xyz)
+
+---Training parameters----
+--epoch [int] : number of training epoch, default: 2.
+--batch_size [int] : batch size for training, default: 4
+--no_window [store_true] : turn off real space windowing of dataset
 ```
 
 This script outputs the (downsampled) particle stack (.mrcs), image poses (.npy), image ctf parameters (.npy), initial Gaussians (.ply) and configure file (.json).

@@ -56,12 +56,10 @@ class Particles:
         self.particle_size = data.D
         self.size_scale = self.particle_size / 2  ### scale vol into [-1, 1], stablize training
 
-        # self.ctf_dir = "%s/%s" % (self.path, ctf_file)
         self.ctf_dir = ctf_file
         self.ctf_param = np.load(self.ctf_dir)
         self.ctf_mask = circular_mask(self.particle_size).cuda()
         self.load_poses()
-        # self.point_dir = "%s/%s" % (self.path, point_cloud)
         self.point_dir = point_cloud
     
     def load_poses(self):
@@ -122,6 +120,7 @@ class Particles:
 
 
     def save(self, epoch, queryfunc, output_path=None):
+        # print('output_path is', output_path)
         if output_path is None:
             point_cloud_path = osp.join(
                 self.path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
@@ -130,6 +129,8 @@ class Particles:
             point_cloud_path = osp.join(
                 output_path, f"point_cloud_{self.particle_name}", f"epoch_{epoch}"
             )
+        # print('point_cloud_path is', point_cloud_path)
+        # sys.exit()
         self.gaussians.save_ply(osp.join(point_cloud_path, "point_cloud.ply"))
         if queryfunc is not None:
             vol_pred = queryfunc(self.gaussians)["vol"]
@@ -205,7 +206,7 @@ def training_EM_homo(
     opt: OptimizationParams_EM,
     pipe: PipelineParams,
     checkpoint,
-    output_dir,
+    # output_dir,
     batch_size,
     total_epoch
 ):
@@ -242,15 +243,10 @@ def training_EM_homo(
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
 
-    # if output_dir is not None:
-    #     save_path = osp.join(dataset.path, output_dir)
     save_path = dataset.path
-
     # Train
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
-    # ckpt_save_path = osp.join(save_path, f"ckpt_{dataset.particle_name}")
-    # os.makedirs(ckpt_save_path, exist_ok=True)
     total_iterations = total_epoch * dataset.particle_num
     progress_bar = tqdm(range(0, total_iterations), desc="Train", leave=False)
     progress_bar.update(first_iter)
@@ -281,7 +277,6 @@ def training_EM_homo(
             ind = minibatch[-1]
             original_image = minibatch[0].cuda()
             orientation = dataset.orientations[ind]
-            # print(dataset.ctf_param[ind].shape)
             ctf_setting = ctf_params(dataset.ctf_param[ind])
             ctf = compute_single_ctf(dataset.particle_size, ctf_setting).float()
             ctf *= fourier_mask
@@ -719,12 +714,6 @@ def downsample_mrc_images(
 
 if __name__ == "__main__":
 
-    # use_cuda = torch.cuda.is_available()
-    # device = torch.device('cuda' if use_cuda else 'cpu')
-    # if use_cuda:
-    #     torch.set_default_tensor_type(torch.cuda.FloatTensor)
-    #     print('Using cuda')
-
     parser = ArgumentParser(description="Extract particle info")
     
     parser.add_argument("--source_dir", type=str, default=None)
@@ -733,24 +722,28 @@ if __name__ == "__main__":
     parser.add_argument("--size", type=int, default=None)
     parser.add_argument("--downsample_size", type=int, default=None)
     parser.add_argument("--apix", type=float, default=None)
+    parser.add_argument("--no_invert", action="store_true")
     parser.add_argument("--consensus_map", type=str, default=None)
     parser.add_argument("--map_thres", type=float, default=None)
     parser.add_argument("--sample_interval", type=int, default=None)
     parser.add_argument("--particle_name", type=str, default='image_stack')
-    parser.add_argument("-downsample_b",type=int,default=5000,help="Batch size for processing images (default: %(default)s)")
+    parser.add_argument("--downsample_batch",type=int,default=5000,help="Batch size for processing images (default: %(default)s)")
     parser.add_argument("--scale_min", type=float, default=0.5)
     parser.add_argument("--scale_max", type=float, default=1.0)
+    parser.add_argument("--output", type=str, default="gaussian_preprocess")
 
     group = parser.add_argument_group(description="Network params")
-    group.add_argument("--gaussian_embedding_dim", type=int, default=32)
+    
     group.add_argument("--qlayers", type=int, default=2)
     group.add_argument("--qdim", type=int, default=1024)
     group.add_argument("--zdim", type=int, default=10)
     group.add_argument("--gaussian_kdim", type=int, default=128)
     group.add_argument("--gaussian_klayers", type=int, default=3)
-    group.add_argument("--feature_dim", type=int, default=256)
+    group.add_argument("--gaussian_embedding_dim", type=int, default=32)
+    
     group.add_argument("--feature_kdim", type=int, default=128)
     group.add_argument("--feature_klayers", type=int, default=2)
+    group.add_argument("--feature_dim", type=int, default=256)
     
     group = parser.add_argument_group(description="Training script parameters")
     lp = ModelParams_EM(parser)
@@ -759,7 +752,6 @@ if __name__ == "__main__":
     group.add_argument("--detect_anomaly", action="store_true", default=False)
     group.add_argument("--no_window", action="store_true")
     group.add_argument("--start_checkpoint", type=str, default=None)
-    group.add_argument("--output", type=str, default="gaussian_preprocess")
     group.add_argument("--epoch", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=4)
 
@@ -775,6 +767,7 @@ if __name__ == "__main__":
     img_size = args.size
     img_down_size = args.downsample_size
     img_apix = args.apix
+    invert_flag = not args.no_invert
 
     print("Extracting particles and information")
 
@@ -799,11 +792,14 @@ if __name__ == "__main__":
         )
     if args.downsample_size % 2 != 0:
         raise ValueError(f"New box size {args.downsample_size=} is not even!")
-    downsample_mrc_images(src, args.downsample_size, os.path.join(gaussian_dir, args.particle_name+'.mrcs'), args.downsample_b)
+    downsample_mrc_images(src, args.downsample_size, os.path.join(gaussian_dir, args.particle_name+'.mrcs'), args.downsample_batch)
 
     with mrcfile.open(os.path.join(gaussian_dir, args.particle_name+'.mrcs'), 'r') as mrc:
         downsample_particle = mrc.data
-        std = np.std(downsample_particle)
+        if invert_flag:
+            std = np.std(downsample_particle)
+        else:
+            std = np.std(downsample_particle * -1)
         # print(std)
 
     print("Sampling initial Gaussians")
@@ -858,7 +854,7 @@ if __name__ == "__main__":
     scanner_cfg['offDetector'] = [0, 0, 0]
     scanner_cfg['accuracy'] = 0.5
     scanner_cfg['ctf'] = True
-    scanner_cfg['invert_contrast'] = True
+    scanner_cfg['invert_contrast'] = invert_flag
     scanner_cfg['pixelSize'] = img_apix
     scanner_cfg['scale_min'] = args.scale_min / img_size 
     scanner_cfg['scale_max'] = args.scale_max / img_size 
@@ -897,17 +893,14 @@ if __name__ == "__main__":
     args.densify_scale_threshold = scanner_cfg['scale_max']
     args.max_scale = scanner_cfg['scale_max'] + 0.00025
     args.contribution_prune_ratio = 0.1
-
     training_EM_homo(
         dataset,
         lp.extract(args),
         op.extract(args),
         pp.extract(args),
         args.start_checkpoint,
-        args.output,
         args.batch_size,
         args.epoch
     )
     print("Gaussians trained complete.")
-    
     os.system('cp ' + osp.join(gaussian_dir, f"point_cloud_{args.particle_name}", f"epoch_{args.epoch - 1}", "point_cloud.ply") + ' ' + gaussian_dir)
